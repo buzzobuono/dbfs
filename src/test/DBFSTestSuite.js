@@ -3,7 +3,7 @@ import fs from 'fs';
 import readline from 'readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 
-const db = await UnifiedFSDB.open('./test_data'); 
+const db = await UnifiedFSDB.open('./test_data');
 
 const users = await db.collection('users');
 
@@ -14,29 +14,29 @@ console.log('✅ Range query:', results.length, 'users aged 25-27');
 
 const query = {
     where: {
-      $and: [
-        {
-            $or: [
+        $or: [
             {
-                $and: [
-                { role: 'designer'},
-                { age: 21 }
+                $or: [
+                    {
+                        $and: [
+                           // { role: 'designer' },
+                            { age: 21 }
+                        ]
+                    },
+                    {
+                        $and: [
+                            //{ 'role': 'manager' },
+                            { age: 36 }
+                        ]
+                    }
                 ]
             },
-            {
-                $and: [
-                { 'role': 'developer' },
-                { age: 20 }
-                ]
-            }
-            ]
-        },
-        { name: 'Chris Brown 1422'}
-    ]
+            { name: 'Morgan Smith 3335' }
+        ]
     },
-   // like: { name: 'c*' },
-    filter: { active: false },
-    orderBy: 'name desc',
+    //like: { name: '*3335*' },
+    //filter: { active: true },
+    orderBy: 'age desc',
     limit: 2
 };
 
@@ -44,13 +44,13 @@ const query = {
 const query1 = {
     where: {
         $and: [
-        // { active: false },
-        { role: 'designer'},
-        // { age: 36 }
+            // { active: false },
+            { role: 'designer' },
+            // { age: 36 }
         ]
     },
     like: { name: 'c*' },
- //   orderBy: 'name asc',
+    //   orderBy: 'name asc',
     limit: 5
 };
 const query2 = {
@@ -59,54 +59,31 @@ const query2 = {
         age: 36
     },
     like: { name: 'c*' },
-    filter : { active: 'true'},
+    filter: { active: 'true' },
     orderBy: 'name asc',
     //offset: 11,
     limit: 5
+};
+
+const query3 = {
+    where: {
+        $and: [
+            { role: 'designer' },
+            { age: 24 },
+            //{ active: true }
+        ]
+    },
+    //like: { name: '*3335*' },
+    //filter: { active: true },
+    orderBy: 'role desc',
+    limit: 2
 };
 
 //var stats = await users.getStats();
 //console.log(JSON.stringify(stats, null, 2));
 
 console.time('timer1');
-var results = await users.find(query);
+var results = await users.find(query3);
 console.timeEnd('timer1');
 console.log(results);
 console.log('----------------------------------\n');
-/*
-var stats = await users.getStats();
-console.log(JSON.stringify(stats, null, 2));
-
-console.time('timer2');
-results = await users.find(query);
-console.timeEnd('timer2');
-console.log(results);
-console.log('----------------------------------\n');
-*/
-
-/*console.time('timer3');
-results = await users.findByFullText('name', 'casey smith');
-console.timeEnd('timer3');
-console.log(results);
-console.log('----------------------------------\n');
-*/
-process.exit();
-
-const rl = readline.createInterface({ input, output });
-
-while (true) {
-    const key = await rl.question('Inserisci la chiave (es. email, age, name, active, role, skills): ');
-    let value = await rl.question('Inserisci il valore: ');
-    
-    if (key === 'age') {
-        value = Number(value);
-    } else if (key === 'active') {
-        value = value.toLowerCase() === 'true';
-    }
-    
-    const results = await users.findByField(key, value);
-    console.log('\n' + key + ': ' + value);
-    console.log(results);
-    console.log('----------------------------------\n');
-}
-

@@ -69,17 +69,12 @@ class MultiFieldQueryEngine {
     }
   }
 
-  async findByComplex(query, options = {}) {
-    const { limit, offset = 0 } = options;
+  async find(query) {
     const results = await this._executeComplexQuery(query);
-    return typeof limit === 'number' ? results.slice(offset, offset + limit) : results;
+    return results;
   }
 
   async _planAndQuery(conditions) {
-    const fields = Object.keys(conditions);
-    const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
-
-    // Check for composite index opportunities first
     const compositeMatch = await this._findBestCompositeIndex(conditions);
     if (compositeMatch) {
       return {
@@ -90,11 +85,13 @@ class MultiFieldQueryEngine {
         matchedFields: compositeMatch.matchedFields,
         unmatchedFields: compositeMatch.unmatchedFields,
         estimatedCost: 10, // Very low cost
-        reason: `Using composite index '${compositeMatch.indexName}' for ${compositeMatch.matchedFields.length}/${fields.length} fields`
+        reason: `Using composite index '${compositeMatch.indexName}' for ${compositeMatch.matchedFields.length}/${compositeMatch.compositeIndex.fields.length} fields`
       };
     }
 
     // Fall back to single field analysis
+    const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
+    const fields = Object.keys(conditions);
     const selectivity = {};
     for (const field of fields) {
       if (indexedFields.includes(field)) {
@@ -126,9 +123,6 @@ class MultiFieldQueryEngine {
   }
 
   async _findBestCompositeIndex(conditions) {
-    const queryFields = Object.keys(conditions);
-
-    // Check both regular composite indices and sharded composite indices
     const candidateIndices = [];
 
     // Check schema-defined composite indices
@@ -137,20 +131,7 @@ class MultiFieldQueryEngine {
         candidateIndices.push({
           indexName,
           fields,
-          type: 'schema',
           manager: this.collection.shardedIndices.get(indexName) || null
-        });
-      }
-    }
-
-    // Check dynamically created sharded composite indices
-    for (const [indexName, manager] of this.collection.shardedIndices.entries()) {
-      if (manager.isComposite) {
-        candidateIndices.push({
-          indexName,
-          fields: manager.fields,
-          type: 'sharded',
-          manager
         });
       }
     }
@@ -163,7 +144,7 @@ class MultiFieldQueryEngine {
     let bestScore = 0;
 
     for (const candidate of candidateIndices) {
-      const match = this._evaluateCompositeMatch(candidate, queryFields, conditions);
+      const match = this._evaluateCompositeMatch(candidate, conditions);
 
       if (match && match.score > bestScore) {
         bestScore = match.score;
@@ -171,10 +152,10 @@ class MultiFieldQueryEngine {
       }
     }
 
-    return bestMatch && bestMatch.score >= 2 ? bestMatch : null; // Require at least 2 matching fields
+    return bestMatch;
   }
 
-  _evaluateCompositeMatch(candidate, queryFields, conditions) {
+  _evaluateCompositeMatch(candidate, conditions) {
     const { indexName, fields: indexFields, manager } = candidate;
 
     if (!manager) return null; // Index not available
@@ -187,21 +168,21 @@ class MultiFieldQueryEngine {
     for (let i = 0; i < indexFields.length; i++) {
       const indexField = indexFields[i];
 
-      if (queryFields.includes(indexField)) {
+      if (conditions.some(obj => indexField in obj)) {
         matchedFields.push(indexField);
         consecutiveMatches++;
       } else {
-        break; // Stop at first non-matching field for prefix optimization
+        break; 
       }
     }
 
     // Find unmatched query fields
-    for (const queryField of queryFields) {
+    for (const condition of conditions) {
+      let queryField = Object.keys(condition)[0];
       if (!matchedFields.includes(queryField)) {
         unmatchedFields.push(queryField);
       }
     }
-
     if (consecutiveMatches === 0) {
       return null;
     }
@@ -210,8 +191,8 @@ class MultiFieldQueryEngine {
     // 1. Number of consecutive matches (higher is better)
     // 2. Percentage of query covered (higher is better)
     // 3. Whether it's an exact match (bonus)
-    const coverageRatio = matchedFields.length / queryFields.length;
-    const exactMatch = matchedFields.length === queryFields.length;
+    const coverageRatio = matchedFields.length / candidate.fields.length;
+    const exactMatch = matchedFields.length === candidate.fields.length;
     const prefixOptimal = consecutiveMatches === matchedFields.length;
 
     let score = consecutiveMatches * 10; // Base score
@@ -232,35 +213,6 @@ class MultiFieldQueryEngine {
       estimatedSelectivity: Math.pow(0.1, matchedFields.length) // Rough estimate
     };
   }
-
-  /*
-    async _planAndQuery(conditions) {
-      const fields = Object.keys(conditions);
-      const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
-      
-      const selectivity = {};
-      for (const field of fields) {
-        if (indexedFields.includes(field)) {
-          const stats = await this._getFieldSelectivity(field, conditions[field]);
-          selectivity[field] = stats;
-        }
-      }
-      
-      if (Object.keys(selectivity).length === 0) {
-        return { useIndex: false, reason: 'No indexed fields in query' };
-      }
-      
-      const mostSelective = Object.entries(selectivity)
-        .sort(([,a], [,b]) => a.estimatedResults - b.estimatedResults)[0];
-      
-      return {
-        useIndex: true,
-        startField: mostSelective[0],
-        selectivity: selectivity,
-        strategy: 'INDEX_INTERSECT'
-      };
-    }
-  */
 
   async _planOrQuery(conditions) {
     const fields = Object.keys(conditions);
@@ -302,7 +254,10 @@ class MultiFieldQueryEngine {
     const { compositeIndex, matchedFields, unmatchedFields } = strategy;
 
     // Extract values for matched fields in correct order
-    const matchedValues = matchedFields.map(field => conditions[field]);
+    const matchedValues = matchedFields.map(field => {
+      const found = conditions.find(obj => Object.prototype.hasOwnProperty.call(obj, field));
+      return found ? found[field] : undefined;
+    });
 
     let candidateIds;
 
@@ -326,16 +281,18 @@ class MultiFieldQueryEngine {
     // Apply remaining conditions not covered by composite index
     let results = candidates;
     if (unmatchedFields.length > 0) {
-      const remainingConditions = {};
-      for (const field of unmatchedFields) {
-        remainingConditions[field] = conditions[field];
-      }
+      const remainingConditions = unmatchedFields.map(field => {
+        const found = conditions.find(obj => Object.prototype.hasOwnProperty.call(obj, field));
+        return found ;
+      });
 
       results = candidates.filter(doc =>
-        Object.entries(remainingConditions).every(([field, value]) =>
-          this._matchesCondition(doc, field, value)
-        )
+        remainingConditions.every(cond => {
+          const [field, value] = Object.entries(cond)[0];
+          return this._matchesCondition(doc, field, value);
+        })
       );
+
     }
 
     return results;
@@ -391,7 +348,7 @@ class MultiFieldQueryEngine {
     return results;
   }
 
-  async _executeTableScanAndQuery(conditions, limit, offset) {
+  async _executeTableScanAndQuery(conditions) {
     const results = [];
 
     const allDocs = await this.collection.storage.getAllDocuments();
@@ -435,7 +392,7 @@ class MultiFieldQueryEngine {
   async _executeAndArray(conditions) {
     let results = null;
 
-    var remainingAndCondition = {};
+    var remainingAndCondition = [];
 
     for (const condition of conditions) {
       let conditionResults = null;
@@ -445,9 +402,7 @@ class MultiFieldQueryEngine {
       } else if (condition.$and) {
         conditionResults = await this._executeAndArray(condition.$and);
       } else {
-        const field = Object.keys(condition)[0];
-        const value = condition[field];
-        remainingAndCondition[field] = value;
+        remainingAndCondition.push(condition);
         continue;
       }
 
@@ -459,8 +414,8 @@ class MultiFieldQueryEngine {
       }
     }
 
-    if (Object.keys(remainingAndCondition).length != 0) {
-      let conditionResults = await this.collection.findByAnd(remainingAndCondition);
+    if (remainingAndCondition.length != 0) {
+      let conditionResults = await this.findByAnd(remainingAndCondition);
 
       if (results === null) {
         results = conditionResults;
@@ -476,7 +431,7 @@ class MultiFieldQueryEngine {
   async _executeOrArray(conditions) {
     const resultMap = new Map();
 
-    var remainingOrCondition = {};
+    var remainingOrCondition = [];
 
     for (const condition of conditions) {
 
@@ -487,9 +442,7 @@ class MultiFieldQueryEngine {
       } else if (condition.$or) {
         conditionResults = await this._executeOrArray(condition.$or);
       } else {
-        const field = Object.keys(condition)[0];
-        const value = condition[field];
-        remainingOrCondition[field] = value;
+        remainingOrCondition.push(condition);
         continue;
       }
 
@@ -498,8 +451,8 @@ class MultiFieldQueryEngine {
       }
     }
 
-    if (Object.keys(remainingOrCondition).length != 0) {
-      let conditionResults = await this.collection.findByOr(remainingOrCondition);
+    if (remainingOrCondition.length != 0) {
+      let conditionResults = await this.findByOr(remainingOrCondition);
 
       for (const doc of conditionResults) {
         resultMap.set(doc.id, doc);
@@ -513,10 +466,11 @@ class MultiFieldQueryEngine {
   _documentMatchesConditions(doc, conditions, operator) {
     const matches = [];
 
-    for (const [field, value] of Object.entries(conditions)) {
+    conditions.every(cond => {
+      const [field, value] = Object.entries(cond)[0];
       const match = this._matchesCondition(doc, field, value);
       matches.push(match);
-    }
+    });
 
     if (operator === 'AND') {
       return matches.every(m => m);

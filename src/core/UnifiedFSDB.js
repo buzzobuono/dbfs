@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import { createHash } from 'crypto';
 import UnifiedCollection from './UnifiedCollection.js'
 
 class UnifiedFSDB {

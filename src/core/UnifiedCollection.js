@@ -6,7 +6,7 @@ import MultiFieldQueryEngine from '../engines/MultiFieldQueryEngine.js'
 import LikeQueryEngine from '../engines/LikeQueryEngine.js'
 import OrderByEngine from '../engines/OrderByEngine.js'
 import RelationEngine from '../engines/RelationEngine.js'
-import ShardedIndexManager from '../indexing/ShardedIndexManager.js'
+import IndexManager from '../indexing/IndexManager.js'
 import PatternMatcher from '../utils/PatternMatcher.js'
 import ValueNormalizer from '../utils/ValueNormalizer.js'
 
@@ -140,26 +140,11 @@ class UnifiedCollection {
   }
 
   async buildAllIndices() {
-/*    const indexedFields = SchemaParser.getIndexedFields(this.schema);
-    
-    const indexPromises = indexedFields.map(field => {
-      const indexPath = path.join(this.indicesPath, `${field}.json`);
-      if (!fs.existsSync(indexPath)) {
-        return this._buildIndex(field);
-      } else {
-        return this._loadIndex(field);
-      }
-    });
-    
-    await Promise.all(indexPromises);
-    
-*/  
-    // Build composite indices
     if (this.schema.indices) {
       for (const [indexName, fields] of Object.entries(this.schema.indices)) {
-        console.log(`🔨 Building composite sharded index: ${indexName}`);
+        console.log(`🔨 Building index: ${indexName}`);
         
-        const compositeIndex = new ShardedIndexManager(
+        const compositeIndex = new IndexManager(
           this.collectionPath, 
           fields, // ← Array of fields for composite
           { shardCount: 16 }
@@ -172,14 +157,14 @@ class UnifiedCollection {
   }
   
   async _buildIndex(field) {
-    const shardedIndex = new ShardedIndexManager(this.collectionPath, field);
+    const shardedIndex = new IndexManager(this.collectionPath, field);
     const stats = await shardedIndex.buildFromDocuments(() => this.storage.getAllDocuments());
     this.shardedIndices.set(field, shardedIndex);
     return stats;
   }
   
   async _loadIndex(name, fields) {
-    const shardedIndex = new ShardedIndexManager(this.collectionPath, fields);
+    const shardedIndex = new IndexManager(this.collectionPath, fields);
     this.shardedIndices.set(name, shardedIndex);
   }
   
@@ -315,44 +300,6 @@ class UnifiedCollection {
     return await this._loadDocuments(limitedIds);
   }
 
-  // ---------- MULTI-FIELD QUERIES (Delegated) ----------
-
-  async findByAnd(conditions, options = {}) {
-    return await this.multiFieldEngine.findByAnd(conditions, options);
-  }
-
-  async findByOr(conditions, options = {}) {
-    return await this.multiFieldEngine.findByOr(conditions, options);
-  }
-
-  async findByComplex(query, options = {}) {
-    return await this.multiFieldEngine.findByComplex(query, options);
-  }
-
-  async findByLike(field, pattern, options = {}) {
-    return await this.likeEngine.findByLike(field, pattern, options);
-  }
-
-  async findByLikes(conditions, operator = 'AND', options = {}) {
-    return await this.likeEngine.findByLikes(conditions, operator, options);
-  }
-
-  async findByFullText(field, searchTerms, options = {}) {
-    return await this.likeEngine.findByFullText(field, searchTerms, options);
-  }
-
-  // ---------- ORDER BY QUERIES (Delegated) ----------
-
-  async findWithOrderBy(query = {}, orderBy, options = {}) {
-    return await this.orderByEngine.findWithOrderBy(query, orderBy, options);
-  }
-
-  async findAllOrderedBy(orderBy, options = {}) {
-    return await this.orderByEngine.findWithOrderBy({}, orderBy, options);
-  }
-
-  // ---------- ADVANCED COMBINED QUERIES ----------
-
   async find(query) {
     const {
       where = null,
@@ -370,7 +317,7 @@ class UnifiedCollection {
     
     // Execute primary query
     if (where) {
-      results = await this.findByComplex(where);
+      results = await this.multiFieldEngine.find(where);
     } else {
       results = await this.storage.getAllDocuments();
     }
