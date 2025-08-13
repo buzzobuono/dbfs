@@ -14,29 +14,28 @@ console.log('✅ Range query:', results.length, 'users aged 25-27');
 
 const query = {
     where: {
-      //  $and: [
-      //  {
+      $and: [
+        {
             $or: [
             {
                 $and: [
-                { role: 'manager'},
-                { age: 46 }
+                { role: 'designer'},
+                { age: 21 }
                 ]
             },
             {
                 $and: [
                 { 'role': 'developer' },
-                { age: 21 }
+                { age: 20 }
                 ]
-            },
-            { name: 'Chris White 156'}
+            }
             ]
-    //    },
-       // { active: false}
-   //     ]
+        },
+        { name: 'Chris Brown 1422'}
+    ]
     },
    // like: { name: 'c*' },
-    filter: { active: true },
+    filter: { active: false },
     orderBy: 'name desc',
     limit: 2
 };
@@ -66,8 +65,8 @@ const query2 = {
     limit: 5
 };
 
-var stats = await users.getStats();
-console.log(JSON.stringify(stats, null, 2));
+//var stats = await users.getStats();
+//console.log(JSON.stringify(stats, null, 2));
 
 console.time('timer1');
 var results = await users.find(query);

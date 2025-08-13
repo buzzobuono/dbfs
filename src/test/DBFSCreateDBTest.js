@@ -10,14 +10,18 @@ const db = await UnifiedFSDB.create('./test_data');
 // Users collection
 const users = await db.collection('users', {
   fields: {
-    name: { type: 'string', required: true, indexed: true },
-    email: { type: 'string', required: true, indexed: true },
-    age: { type: 'number', indexed: true },
-    role: { type: 'string', indexed: true },
-    //skills: { type: 'array', indexed: true },
-   // active: { type: 'boolean', indexed: true }
+    name: { type: 'string', required: true },
+    email: { type: 'string', required: true },
+    age: { type: 'number' },
+    role: { type: 'string' },
+    skills: { type: 'array' },
+    active: { type: 'boolean', required: true },
+    phone: { type: 'string' }
   },
   indices: { 
+    'age': ['age'],
+    'role': ['role'],
+    'name': ['name'],
     'age_role' : [ 'age', 'role']
   }
 });
@@ -46,7 +50,7 @@ function generateName(index) {
   return `${getRandomElement(firstNames)} ${getRandomElement(lastNames)} ${index}`;
 }
 
-for (let i = 1; i <= 100; i++) {
+for (let i = 1; i <= 100000; i++) {
   const role = getRandomElement(roles);
   const name = generateName(i);
   const email = name.toLowerCase().replace(/\s+/g, '.').replace(/_/g, '') + '@test.com';
@@ -66,6 +70,6 @@ for (let i = 1; i <= 100; i++) {
   await users.insert(user, { updateIndices: false });
 }
 
-await users.rebuildAllIndices();
+await users.buildAllIndices();
 await db.close();
 

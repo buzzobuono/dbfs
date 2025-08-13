@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
-import SchemaParser from '../core/SchemaParser.js'
 import ValueNormalizer from '../utils/ValueNormalizer.js'
 
 class ShardedIndexManager {
@@ -56,14 +55,27 @@ class ShardedIndexManager {
 
   _getShardPath(shardKey) {
     const indexName = this.isComposite 
-      ? `composite_${this.fields.join('_')}_shard${shardKey}.json`
+      ? `${this.fields.join('_')}_shard${shardKey}.json`
       : `${this.field}_shard${shardKey}.json`;
     return path.join(this.indicesPath, indexName);
   }
   
-  async addComposite(values, docId) {
+  async add(values, docId) {
     if (!this.isComposite) {
-      return await this.add(values, docId);
+      const shardKey = this._getShardKey(values);
+      const shard = await this._loadShard(shardKey);
+      const normalizedValue = ValueNormalizer.normalize(value);
+      
+      if (!shard.has(normalizedValue)) {
+        shard.set(normalizedValue, []);
+      }
+      
+      const docIds = shard.get(normalizedValue);
+      if (!docIds.includes(docId)) {
+        docIds.push(docId);
+      }
+      
+      return await this._saveShard(shardKey);
     }
     
     const compositeKey = this._generateCompositeKey(values);
@@ -79,12 +91,27 @@ class ShardedIndexManager {
       docIds.push(docId);
     }
     
-    this._scheduleSave(shardKey);
+    this._saveShard(shardKey);
   }
 
   async removeComposite(values, docId) {
     if (!this.isComposite) {
-      return await this.remove(values, docId);
+      const shardKey = this._getShardKey(values);
+      const shard = await this._loadShard(shardKey);
+      const normalizedValue = ValueNormalizer.normalize(value);
+      
+      if (shard.has(normalizedValue)) {
+        const docIds = shard.get(normalizedValue);
+        const index = docIds.indexOf(docId);
+        if (index !== -1) {
+          docIds.splice(index, 1);
+          if (docIds.length === 0) {
+            shard.delete(normalizedValue);
+          }
+        }
+      }
+
+      return await this._saveShard(shardKey);
     }
     
     const compositeKey = this._generateCompositeKey(values);
@@ -99,7 +126,7 @@ class ShardedIndexManager {
         if (docIds.length === 0) {
           shard.delete(compositeKey);
         }
-        this._scheduleSave(shardKey);
+        this._saveShard(shardKey);
       }
     }
   }
@@ -142,41 +169,6 @@ class ShardedIndexManager {
     const shard = await this._loadShard(shardKey);
     const normalizedValue = ValueNormalizer.normalize(value);
     return shard.get(normalizedValue) || [];
-  }
-
-  async add(value, docId) {
-    const shardKey = this._getShardKey(value);
-    const shard = await this._loadShard(shardKey);
-    const normalizedValue = ValueNormalizer.normalize(value);
-    
-    if (!shard.has(normalizedValue)) {
-      shard.set(normalizedValue, []);
-    }
-    
-    const docIds = shard.get(normalizedValue);
-    if (!docIds.includes(docId)) {
-      docIds.push(docId);
-    }
-    
-    await this._saveShard(shardKey);
-  }
-
-  async remove(value, docId) {
-    const shardKey = this._getShardKey(value);
-    const shard = await this._loadShard(shardKey);
-    const normalizedValue = ValueNormalizer.normalize(value);
-    
-    if (shard.has(normalizedValue)) {
-      const docIds = shard.get(normalizedValue);
-      const index = docIds.indexOf(docId);
-      if (index !== -1) {
-        docIds.splice(index, 1);
-        if (docIds.length === 0) {
-          shard.delete(normalizedValue);
-        }
-        await this._saveShard(shardKey);
-      }
-    }
   }
 
   async _saveShard(shardKey) {

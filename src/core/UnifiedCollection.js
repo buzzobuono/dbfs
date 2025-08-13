@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import { createHash } from 'crypto';
 import SchemaParser from './SchemaParser.js'
 import DocumentStorage from '../storage/DocumentStorage.js'
 import MultiFieldQueryEngine from '../engines/MultiFieldQueryEngine.js'
@@ -8,7 +7,6 @@ import LikeQueryEngine from '../engines/LikeQueryEngine.js'
 import OrderByEngine from '../engines/OrderByEngine.js'
 import RelationEngine from '../engines/RelationEngine.js'
 import ShardedIndexManager from '../indexing/ShardedIndexManager.js'
-import RegularIndexManager from '../indexing/RegularIndexManager.js'
 import PatternMatcher from '../utils/PatternMatcher.js'
 import ValueNormalizer from '../utils/ValueNormalizer.js'
 
@@ -41,7 +39,7 @@ class UnifiedCollection {
     
     // Conditional index building
     if (!this.options.skipInitialIndexBuild) {
-      await this._buildSchemaIndices();
+      await this.buildAllIndices();
     } else {
       await this._loadExistingIndices();
     }
@@ -55,18 +53,29 @@ class UnifiedCollection {
       return;
     }
     
-    const indexedFields = SchemaParser.getIndexedFields(this.schema);
+    //const indexedFields = SchemaParser.getIndexedFields(this.schema);
+    //const indexFiles = fs.readdirSync(this.indicesPath).filter(f => f.endsWith('.json'));
+    //
+    //for (const indexFile of indexFiles) {
+    //  const fieldName = indexFile.replace('.json', '').replace(/_shard\d+/, '');
+    //  
+    //  if (indexedFields.includes(fieldName)) {
+    //    await this._loadIndex(fieldName);
+    //    console.log(`✅ Loaded index for field: ${fieldName}`);
+    //  }
+    //}
+    
+    const indices = this.schema.indices;
     const indexFiles = fs.readdirSync(this.indicesPath).filter(f => f.endsWith('.json'));
     
     for (const indexFile of indexFiles) {
-      const fieldName = indexFile.replace('.json', '').replace(/_shard\d+/, '');
+      const indexName = indexFile.replace('.json', '').replace(/_shard\d+/, '');
       
-      if (indexedFields.includes(fieldName)) {
-        await this._loadIndex(fieldName);
-        console.log(`✅ Loaded index for field: ${fieldName}`);
+      if (indices.hasOwnProperty(indexName)) {
+        await this._loadIndex(indexName, this.schema.indices[indexName]);
+        console.log(`✅ Loaded index: ${indexName}`);
       }
     }
-    
     console.log(`📋 Loaded ${this.shardedIndices.size} indices for ${this.name}`);
   }
   
@@ -85,7 +94,7 @@ class UnifiedCollection {
     }
     
     // Rebuild from scratch
-    await this._buildSchemaIndices();
+    await this.buildAllIndices();
     
     console.log('✅ All indices rebuilt');
   }
@@ -130,10 +139,8 @@ class UnifiedCollection {
     }
   }
 
-  async _buildSchemaIndices() {
-    const indexedFields = SchemaParser.getIndexedFields(this.schema);
-    
-    if (indexedFields.length === 0) return;
+  async buildAllIndices() {
+/*    const indexedFields = SchemaParser.getIndexedFields(this.schema);
     
     const indexPromises = indexedFields.map(field => {
       const indexPath = path.join(this.indicesPath, `${field}.json`);
@@ -146,9 +153,10 @@ class UnifiedCollection {
     
     await Promise.all(indexPromises);
     
+*/  
     // Build composite indices
-    if (this.schema.compositeIndices) {
-      for (const [indexName, fields] of Object.entries(this.schema.compositeIndices)) {
+    if (this.schema.indices) {
+      for (const [indexName, fields] of Object.entries(this.schema.indices)) {
         console.log(`🔨 Building composite sharded index: ${indexName}`);
         
         const compositeIndex = new ShardedIndexManager(
@@ -170,9 +178,9 @@ class UnifiedCollection {
     return stats;
   }
   
-  async _loadIndex(field) {
-    const shardedIndex = new ShardedIndexManager(this.collectionPath, field);
-    this.shardedIndices.set(field, shardedIndex);
+  async _loadIndex(name, fields) {
+    const shardedIndex = new ShardedIndexManager(this.collectionPath, fields);
+    this.shardedIndices.set(name, shardedIndex);
   }
   
   // ---------- CORE CRUD ----------
