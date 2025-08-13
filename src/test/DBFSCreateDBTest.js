@@ -14,10 +14,12 @@ const users = await db.collection('users', {
     email: { type: 'string', required: true, indexed: true },
     age: { type: 'number', indexed: true },
     role: { type: 'string', indexed: true },
-    skills: { type: 'array', indexed: true },
-    active: { type: 'boolean', indexed: true }
+    //skills: { type: 'array', indexed: true },
+   // active: { type: 'boolean', indexed: true }
   },
-  useSharding: true
+  indices: { 
+    'age_role' : [ 'age', 'role']
+  }
 });
 
 const roles = ['developer', 'designer', 'manager'];
@@ -44,7 +46,7 @@ function generateName(index) {
   return `${getRandomElement(firstNames)} ${getRandomElement(lastNames)} ${index}`;
 }
 
-for (let i = 1; i <= 1000; i++) {
+for (let i = 1; i <= 100; i++) {
   const role = getRandomElement(roles);
   const name = generateName(i);
   const email = name.toLowerCase().replace(/\s+/g, '.').replace(/_/g, '') + '@test.com';
@@ -61,8 +63,9 @@ for (let i = 1; i <= 1000; i++) {
     active
   };
   console.log(user);
-  await users.insert(user);
+  await users.insert(user, { updateIndices: false });
 }
 
+await users.rebuildAllIndices();
 await db.close();
 

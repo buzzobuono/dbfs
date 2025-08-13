@@ -5,6 +5,7 @@ import SchemaParser from '../core/SchemaParser.js'
 import PatternMatcher from '../utils/PatternMatcher.js'
 
 class LikeQueryEngine {
+  
   constructor(collection) {
     this.collection = collection;
     this.patternCache = new Map();
@@ -48,9 +49,9 @@ class LikeQueryEngine {
     }
     
     if (operator === 'AND') {
-      return await this._executeLikeAnd(conditions, otherOptions.limit || 1000, otherOptions.offset || 0);
+      return await this._executeLikeAnd(termConditions, otherOptions.limit || 1000, otherOptions.offset || 0);
     } else {
-      return await this._executeLikeOr(conditions, otherOptions.limit || 1000, otherOptions.offset || 0);
+      return await this._executeLikeOr(termConditions, otherOptions.limit || 1000, otherOptions.offset || 0);
     }
   }
 
@@ -146,12 +147,13 @@ class LikeQueryEngine {
   }
 
   async _executeLikeAnd(conditions, limit, offset) {
+    console.log(conditions);
     const patterns = Object.entries(conditions).map(([field, pattern]) => ({
       field,
       pattern,
       info: PatternMatcher.analyzePattern(pattern)
     }));
-    
+    console.log(patterns);
     patterns.sort((a, b) => {
       if (a.info.canUseIndex && !b.info.canUseIndex) return -1;
       if (!a.info.canUseIndex && b.info.canUseIndex) return 1;

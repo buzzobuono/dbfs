@@ -9,23 +9,101 @@ class ShardedIndexManager {
   constructor(collectionPath, field, options = {}) {
     this.collectionPath = collectionPath;
     this.field = field;
+    this.isComposite = Array.isArray(field); // ← Nuovo: detect composite
+    this.fields = this.isComposite ? field : [field];
     this.shardCount = options.shardCount || 16;
     this.maxShardSize = options.maxShardSize || 50 * 1024 * 1024;
     this.indicesPath = path.join(collectionPath, '_indices');
     
     this.loadedShards = new Map();
+    this.shardStats = new Map();
     
   }
+  
+  // ---------- COMPOSITE KEY GENERATION ----------
+  
+  _generateCompositeKey(values) {
+    if (!this.isComposite) {
+      return ValueNormalizer.normalize(values);
+    }
+    
+    // values può essere un documento o array di valori
+    let keyValues;
+    if (Array.isArray(values)) {
+      keyValues = values;
+    } else {
+      // Extract values from document for each field
+      keyValues = this.fields.map(field => values[field]);
+    }
+    
+    return keyValues
+      .map(v => ValueNormalizer.normalize(v))
+      .join('|');
+  }
 
-  _getShardKey(value) {
-    const hash = createHash('md5').update(String(value)).digest('hex');
+  _parseCompositeKey(compositeKey) {
+    if (!this.isComposite) {
+      return [compositeKey];
+    }
+    return compositeKey.split('|');
+  }
+  
+  _getShardKey(values) {
+    const compositeKey = this._generateCompositeKey(values);
+    const hash = createHash('md5').update(compositeKey).digest('hex');
     return parseInt(hash.substring(0, 2), 16) % this.shardCount;
   }
 
   _getShardPath(shardKey) {
-    return path.join(this.indicesPath, `${this.field}_shard${shardKey}.json`);
+    const indexName = this.isComposite 
+      ? `composite_${this.fields.join('_')}_shard${shardKey}.json`
+      : `${this.field}_shard${shardKey}.json`;
+    return path.join(this.indicesPath, indexName);
+  }
+  
+  async addComposite(values, docId) {
+    if (!this.isComposite) {
+      return await this.add(values, docId);
+    }
+    
+    const compositeKey = this._generateCompositeKey(values);
+    const shardKey = this._getShardKey(values);
+    const shard = await this._loadShard(shardKey);
+    
+    if (!shard.has(compositeKey)) {
+      shard.set(compositeKey, []);
+    }
+    
+    const docIds = shard.get(compositeKey);
+    if (!docIds.includes(docId)) {
+      docIds.push(docId);
+    }
+    
+    this._scheduleSave(shardKey);
   }
 
+  async removeComposite(values, docId) {
+    if (!this.isComposite) {
+      return await this.remove(values, docId);
+    }
+    
+    const compositeKey = this._generateCompositeKey(values);
+    const shardKey = this._getShardKey(values);
+    const shard = await this._loadShard(shardKey);
+    
+    if (shard.has(compositeKey)) {
+      const docIds = shard.get(compositeKey);
+      const index = docIds.indexOf(docId);
+      if (index !== -1) {
+        docIds.splice(index, 1);
+        if (docIds.length === 0) {
+          shard.delete(compositeKey);
+        }
+        this._scheduleSave(shardKey);
+      }
+    }
+  }
+  
   async _loadShard(shardKey) {
     if (this.loadedShards.has(shardKey)) {
       return this.loadedShards.get(shardKey);
@@ -120,10 +198,111 @@ class ShardedIndexManager {
     }
   }
 
-  async buildFromDocuments(getAllDocuments) {
-    console.log(`🏗️ Building sharded index for field: ${this.field}`);
-    console.time(`build-sharded-${this.field}`);
+  // ---------- ADVANCED QUERY METHODS ----------
+  
+  async getExact(values) {
+    const compositeKey = this._generateCompositeKey(values);
+    const shardKey = this._getShardKey(values);
+    const shard = await this._loadShard(shardKey);
     
+    return shard.get(compositeKey) || [];
+  }
+
+  async getPrefix(prefixValues) {
+    if (!this.isComposite) {
+      throw new Error('Prefix queries only available for composite indices');
+    }
+    
+    const prefixKey = prefixValues
+      .map(v => ValueNormalizer.normalize(v))
+      .join('|');
+    
+    const results = [];
+    
+    // Need to check all shards for prefix matches (expensive but necessary)
+    for (let shardKey = 0; shardKey < this.shardCount; shardKey++) {
+      try {
+        const shard = await this._loadShard(shardKey);
+        
+        for (const [key, docIds] of shard.entries()) {
+          if (key.startsWith(prefixKey + '|') || key === prefixKey) {
+            results.push(...docIds);
+          }
+        }
+      } catch (e) {
+        // Skip missing shards
+      }
+    }
+    
+    return [...new Set(results)]; // Remove duplicates
+  }
+
+  async getRange(prefixValues, lastFieldMin, lastFieldMax) {
+    if (!this.isComposite) {
+      throw new Error('Range queries only available for composite indices');
+    }
+    
+    const prefix = prefixValues
+      .map(v => ValueNormalizer.normalize(v))
+      .join('|');
+    
+    const results = [];
+    
+    // Check all shards for range matches
+    for (let shardKey = 0; shardKey < this.shardCount; shardKey++) {
+      try {
+        const shard = await this._loadShard(shardKey);
+        
+        for (const [key, docIds] of shard.entries()) {
+          if (key.startsWith(prefix + '|')) {
+            const parts = this._parseCompositeKey(key);
+            const lastValue = parseFloat(parts[parts.length - 1]);
+            
+            if (!isNaN(lastValue) && lastValue >= lastFieldMin && lastValue <= lastFieldMax) {
+              results.push(...docIds);
+            }
+          }
+        }
+      } catch (e) {
+        // Skip missing shards
+      }
+    }
+    
+    return [...new Set(results)];
+  }
+
+  async getPartialMatch(conditions) {
+    if (!this.isComposite) {
+      throw new Error('Partial match only available for composite indices');
+    }
+    
+    // Build partial key from available conditions
+    const partialValues = this.fields.map(field => 
+      conditions.hasOwnProperty(field) ? conditions[field] : null
+    );
+    
+    // Find first null value (incomplete key)
+    const completeLength = partialValues.findIndex(v => v === null);
+    const actualLength = completeLength === -1 ? partialValues.length : completeLength;
+    
+    if (actualLength === 0) {
+      throw new Error('At least one field value required for partial match');
+    }
+    
+    if (actualLength === this.fields.length) {
+      // Complete key - use exact match
+      return await this.getExact(partialValues);
+    } else {
+      // Partial key - use prefix match
+      return await this.getPrefix(partialValues.slice(0, actualLength));
+    }
+  }
+  
+  async buildFromDocuments(getAllDocuments) {
+    console.log(`🏗️ Building sharded ${this.isComposite ? 'composite' : 'single'} index for: ${this.fields.join(', ')}`);
+    console.time(`build-sharded-${this.fields.join('_')}`);
+    
+    // Clear existing shards
     this.loadedShards.clear();
     for (let i = 0; i < this.shardCount; i++) {
       const shardPath = this._getShardPath(i);
@@ -132,6 +311,7 @@ class ShardedIndexManager {
       }
     }
     
+    // Initialize empty shards
     const shards = [];
     for (let i = 0; i < this.shardCount; i++) {
       shards[i] = new Map();
@@ -141,27 +321,49 @@ class ShardedIndexManager {
     let processedDocs = 0;
     
     for (const doc of docs) {
-      const value = doc[this.field];
-      if (value !== undefined && value !== null) {
-        const values = Array.isArray(value) ? value : [value];
-        
-        for (const val of values) {
-          const shardKey = this._getShardKey(val);
-          const normalizedValue = ValueNormalizer.normalize(val);
+      // Check if all required fields are present
+      const hasAllFields = this.fields.every(field => 
+        doc[field] !== undefined && doc[field] !== null
+      );
+      
+      if (hasAllFields) {
+        if (this.isComposite) {
+          // Composite index
+          const compositeKey = this._generateCompositeKey(doc);
+          const shardKey = this._getShardKey(doc);
           
-          if (!shards[shardKey].has(normalizedValue)) {
-            shards[shardKey].set(normalizedValue, []);
+          if (!shards[shardKey].has(compositeKey)) {
+            shards[shardKey].set(compositeKey, []);
           }
           
-          const docIds = shards[shardKey].get(normalizedValue);
+          const docIds = shards[shardKey].get(compositeKey);
           if (!docIds.includes(doc.id)) {
             docIds.push(doc.id);
+          }
+        } else {
+          // Single field index (handle arrays)
+          const value = doc[this.field];
+          const values = Array.isArray(value) ? value : [value];
+          
+          for (const val of values) {
+            const shardKey = this._getShardKey(val);
+            const normalizedValue = ValueNormalizer.normalize(val);
+            
+            if (!shards[shardKey].has(normalizedValue)) {
+              shards[shardKey].set(normalizedValue, []);
+            }
+            
+            const docIds = shards[shardKey].get(normalizedValue);
+            if (!docIds.includes(doc.id)) {
+              docIds.push(doc.id);
+            }
           }
         }
       }
       processedDocs++;
     }
     
+    // Save all shards
     const savePromises = [];
     for (let i = 0; i < this.shardCount; i++) {
       if (shards[i].size > 0) {
@@ -172,12 +374,12 @@ class ShardedIndexManager {
     
     await Promise.all(savePromises);
     
-    console.timeEnd(`build-sharded-${this.field}`);
+    console.timeEnd(`build-sharded-${this.fields.join('_')}`);
     console.log(`✅ Built sharded index: ${processedDocs} docs across ${this.shardCount} shards`);
     
     return this.getStats();
   }
-
+  
   async _getAllKeys() {
     const allKeys = new Map();
     
@@ -199,6 +401,7 @@ class ShardedIndexManager {
     return allKeys;
   }
 
+  /*
   async getStats() {
     const stats = {
       field: this.field,
@@ -214,7 +417,31 @@ class ShardedIndexManager {
     stats.totalMemory = totalMemory;
     return stats;
   }
-
+*/
+  
+  async getStats() {
+    const stats = {
+      fields: this.fields,
+      isComposite: this.isComposite,
+      shardCount: this.shardCount,
+      loadedShards: this.loadedShards.size,
+      totalKeys: 0,
+      totalSizeBytes: 0,
+      shardDetails: []
+    };
+    
+    for (const [shardKey, shardStats] of this.shardStats.entries()) {
+      stats.totalKeys += shardStats.keys;
+      stats.totalSizeBytes += shardStats.sizeBytes;
+      stats.shardDetails.push({
+        shard: shardKey,
+        ...shardStats
+      });
+    }
+    
+    return stats;
+  }
+  
   async close() {
     const savePromises = Array.from(this.loadedShards.keys()).map(shardKey => 
       this._saveShard(shardKey)

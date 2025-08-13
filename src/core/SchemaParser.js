@@ -8,7 +8,8 @@ class SchemaParser {
     return {
       fields: schema.fields || {},
       relations: this.parseRelations(schema.relations || {}),
-      validateRelations: schema.validateRelations || false
+      validateRelations: schema.validateRelations || false,
+      indices: schema.indices || {}
     };
   }
 
@@ -92,6 +93,7 @@ class SchemaParser {
     
     return indexed;
   }
+  
 }
 
 

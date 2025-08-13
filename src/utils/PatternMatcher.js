@@ -42,29 +42,41 @@ class PatternMatcher {
 
     return info;
   }
-
+  
   static sqlToRegex(pattern, caseSensitive) {
     let regexPattern = pattern
-      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      .replace(/\\%/g, '.*')
-      .replace(/\\_/g, '.');
+    // Escape dei caratteri speciali regex
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // % → .*  (qualsiasi sequenza)
+    .replace(/%/g, '.*')
+    // _ → .   (un carattere qualsiasi)
+    .replace(/_/g, '.')
+    // \\% → % (letterale)
+    .replace(/\\\.\*/g, '%')
+    // \\_ → _ (letterale)
+    .replace(/\\\./g, '_');
     
     const flags = caseSensitive ? '' : 'i';
     return new RegExp(`^${regexPattern}$`, flags);
   }
-
+  
   static unixToRegex(pattern, caseSensitive) {
-    let regexPattern = pattern
-      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      .replace(/\\\*/g, '.*')
-      .replace(/\\\?/g, '.');
+  let regexPattern = pattern
+    // Escape caratteri speciali regex
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // * → .*  (qualsiasi sequenza di caratteri)
+    .replace(/\\\*/g, '.*')
+    // ? → .   (un carattere qualsiasi)
+    .replace(/\\\?/g, '.');
     
     const flags = caseSensitive ? '' : 'i';
     return new RegExp(`^${regexPattern}$`, flags);
   }
-
+  
   static documentMatches(doc, field, patternInfo) {
+    
     const value = doc[field];
+    
     if (value === undefined || value === null) return false;
     
     if (Array.isArray(value)) {
@@ -76,7 +88,7 @@ class PatternMatcher {
       if (nestedValue === undefined || nestedValue === null) return false;
       return patternInfo.regex.test(String(nestedValue));
     }
-    
+    //console.log(patternInfo);
     return patternInfo.regex.test(String(value));
   }
 

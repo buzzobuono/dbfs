@@ -5,38 +5,79 @@ import SchemaParser from '../core/SchemaParser.js'
 import ValueNormalizer from '../utils/ValueNormalizer.js'
 
 class MultiFieldQueryEngine {
+  
   constructor(collection) {
     this.collection = collection;
   }
 
-  async findByAnd(conditions, options = {}) {
-    const { limit = 1000, offset = 0 } = options;
+  async findByField(field, value) {
+    const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
     
-    const strategy = await this._planAndQuery(conditions);
-    
-    if (strategy.useIndex) {
-      return await this._executeIndexedAndQuery(conditions, strategy, limit, offset);
+    if (indexedFields.includes(field)) {
+      return await this._indexScan(field, value);
     } else {
-      return await this._executeTableScanAndQuery(conditions, limit, offset);
+      return await this._tableScan(field, value);
     }
   }
 
-  async findByOr(conditions, options = {}) {
-    const { limit = 1000, offset = 0 } = options;
+  async _indexScan(field, value) {
+    if (this.collection.shardedIndices.has(field)) {
+      const shardedIndex = this.collection.shardedIndices.get(field);
+      const ids = await shardedIndex.get(value);
+      return await this.collection._loadDocuments(ids);
+    }
+    return [];
+  }
+
+  async _tableScan(field, value) {
+    const results = [];
     
-    const strategy = await this._planOrQuery(conditions);
+    const allDocs = await this.storage.getAllDocuments();
+    
+    for (const doc of allDocs) {
+      if (this._documentMatches(doc, field, value)) {
+        results.push(doc);
+      }
+    }
+    
+    return results;
+  }
+  async findByAnd(conditions) {
+    const strategy = await this._planAndQuery(conditions);
+    
+    console.log('Plan And Query\n Conditions:');
+    console.log(conditions);
+    console.log('Strategy:');
+    console.log(strategy)
     
     if (strategy.useIndex) {
-      return await this._executeIndexedOrQuery(conditions, strategy, limit, offset);
+      return await this._executeIndexedAndQuery(conditions, strategy);
     } else {
-      return await this._executeTableScanOrQuery(conditions, limit, offset);
+      return await this._executeTableScanAndQuery(conditions);
+    }
+  }
+
+  async findByOr(conditions) {
+    const strategy = await this._planOrQuery(conditions);
+    
+    console.log('Plan Or Query\n Conditions:');
+    console.log(conditions);
+    console.log('Strategy:');
+    console.log(strategy)
+    
+    if (strategy.useIndex) {
+      return await this._executeIndexedOrQuery(conditions, strategy);
+    } else {
+      return await this._executeTableScanOrQuery(conditions);
     }
   }
 
   async findByComplex(query, options = {}) {
-    return await this._executeComplexQuery(query, options);
+    const { limit, offset = 0 } = options;
+    const results = await this._executeComplexQuery(query);
+    return typeof limit === 'number' ? results.slice(offset, offset + limit) : results;
   }
-
+  
   async _planAndQuery(conditions) {
     const fields = Object.keys(conditions);
     const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
@@ -105,13 +146,58 @@ class MultiFieldQueryEngine {
     return { estimatedResults: 10000 }; // High estimate for non-indexed
   }
 
-  async _executeIndexedAndQuery(conditions, strategy, limit, offset) {
+  async _executeCompositeIndexQuery(conditions, strategy) {
+    const { compositeIndex, matchedFields, unmatchedFields } = strategy;
+    
+    // Extract values for matched fields in correct order
+    const matchedValues = matchedFields.map(field => conditions[field]);
+    
+    let candidateIds;
+    
+    if (unmatchedFields.length === 0) {
+      // Perfect match - use exact query
+      console.log(`🎯 Exact composite match on [${matchedFields.join(', ')}]`);
+      candidateIds = await compositeIndex.getExact(matchedValues);
+    } else {
+      // Partial match - use prefix query
+      console.log(`🎯 Prefix composite match on [${matchedFields.join(', ')}], filtering [${unmatchedFields.join(', ')}]`);
+      candidateIds = await compositeIndex.getPrefix(matchedValues);
+    }
+    
+    if (candidateIds.length === 0) {
+      return [];
+    }
+    
+    // Load candidate documents
+    const candidates = await this.collection.loadDocumentsBatch(candidateIds);
+    
+    // Apply remaining conditions not covered by composite index
+    let filtered = candidates;
+    if (unmatchedFields.length > 0) {
+      const remainingConditions = {};
+      for (const field of unmatchedFields) {
+        remainingConditions[field] = conditions[field];
+      }
+      
+      results = candidates.filter(doc =>
+      Object.entries(remainingConditions).every(([field, value]) =>
+      this._matchesCondition(doc, field, value)
+      )
+      );
+    }
+    
+    return results;
+  }
+  
+  async _executeIndexedAndQuery(conditions, strategy) {
+    if (strategy.strategy === 'COMPOSITE_INDEX') {
+      return await this._executeCompositeIndexQuery(conditions, strategy, limit, offset);
+    }
+    
     const startField = strategy.startField;
     const startValue = conditions[startField];
     
-    const candidates = await this.collection.findByField(startField, startValue, { 
-      limit: 10000 
-    });
+    const candidates = await this.findByField(startField, startValue);
     
     const remainingConditions = { ...conditions };
     delete remainingConditions[startField];
@@ -121,15 +207,15 @@ class MultiFieldQueryEngine {
       filtered = filtered.filter(doc => this._matchesCondition(doc, field, value));
     }
     
-    return filtered.slice(offset, offset + limit);
+    return filtered;
   }
 
-  async _executeIndexedOrQuery(conditions, strategy, limit, offset) {
+  async _executeIndexedOrQuery(conditions, strategy) {
     const resultMap = new Map();
     
     for (const field of strategy.indexedFields) {
       const value = conditions[field];
-      const results = await this.collection.findByField(field, value, { limit: 5000 });
+      const results = await this.findByField(field, value, { limit: 5000 });
       
       for (const doc of results) {
         resultMap.set(doc.id, doc);
@@ -150,30 +236,24 @@ class MultiFieldQueryEngine {
     }
     
     const results = Array.from(resultMap.values());
-    return results.slice(offset, offset + limit);
+    return results;
   }
 
   async _executeTableScanAndQuery(conditions, limit, offset) {
     const results = [];
-    let skipped = 0;
     
     const allDocs = await this.collection.storage.getAllDocuments();
     
     for (const doc of allDocs) {
       if (this._documentMatchesConditions(doc, conditions, 'AND')) {
-        if (skipped < offset) {
-          skipped++;
-          continue;
-        }
         results.push(doc);
-        if (results.length >= limit) break;
       }
     }
     
     return results;
   }
 
-  async _executeTableScanOrQuery(conditions, limit, offset) {
+  async _executeTableScanOrQuery(conditions) {
     const resultMap = new Map();
     
     const allDocs = await this.collection.storage.getAllDocuments();
@@ -185,35 +265,38 @@ class MultiFieldQueryEngine {
     }
     
     const results = Array.from(resultMap.values());
-    return results.slice(offset, offset + limit);
+    return results;
   }
 
-  async _executeComplexQuery(query, options = {}) {
+  async _executeComplexQuery(query) {
     if (query.$and) {
-      return await this._executeAndArray(query.$and, options);
+      return await this._executeAndArray(query.$and);
     }
     
     if (query.$or) {
-      return await this._executeOrArray(query.$or, options);
+      return await this._executeOrArray(query.$or);
     }
     
-    return await this.findByAnd(query, options);
+    return await this.findByAnd(query);
   }
 
-  async _executeAndArray(conditions, options) {
+  async _executeAndArray(conditions) {
     let results = null;
     
+    var remainingAndCondition = {};
+    
     for (const condition of conditions) {
-      let conditionResults;
+      let conditionResults = null;
       
       if (condition.$or) {
-        conditionResults = await this._executeOrArray(condition.$or, { limit: 10000 });
+        conditionResults = await this._executeOrArray(condition.$or);
       } else if (condition.$and) {
-        conditionResults = await this._executeAndArray(condition.$and, { limit: 10000 });
+        conditionResults = await this._executeAndArray(condition.$and);
       } else {
         const field = Object.keys(condition)[0];
         const value = condition[field];
-        conditionResults = await this.collection.findByField(field, value, { limit: 10000 });
+        remainingAndCondition[field] = value;
+        continue;
       }
       
       if (results === null) {
@@ -223,25 +306,39 @@ class MultiFieldQueryEngine {
         results = conditionResults.filter(doc => resultMap.has(doc.id));
       }
     }
+         
+    if (Object.keys(remainingAndCondition).length != 0) {
+      let conditionResults = await this.collection.findByAnd(remainingAndCondition);
+      
+      if (results === null) {
+        results = conditionResults;
+      } else {
+        const resultMap = new Map(results.map(doc => [doc.id, doc]));
+        results = conditionResults.filter(doc => resultMap.has(doc.id));
+      }
+    }
     
-    const { limit = 1000, offset = 0 } = options;
-    return results.slice(offset, offset + limit);
+    return results;
   }
 
-  async _executeOrArray(conditions, options) {
+  async _executeOrArray(conditions) {
     const resultMap = new Map();
     
+    var remainingOrCondition = {};
+    
     for (const condition of conditions) {
+      
       let conditionResults;
       
       if (condition.$and) {
-        conditionResults = await this._executeAndArray(condition.$and, { limit: 10000 });
+        conditionResults = await this._executeAndArray(condition.$and);
       } else if (condition.$or) {
-        conditionResults = await this._executeOrArray(condition.$or, { limit: 10000 });
+        conditionResults = await this._executeOrArray(condition.$or);
       } else {
         const field = Object.keys(condition)[0];
         const value = condition[field];
-        conditionResults = await this.collection.findByField(field, value, { limit: 10000 });
+        remainingOrCondition[field] = value;
+        continue;
       }
       
       for (const doc of conditionResults) {
@@ -249,9 +346,16 @@ class MultiFieldQueryEngine {
       }
     }
     
+    if (Object.keys(remainingOrCondition).length != 0) {
+      let conditionResults = await this.collection.findByOr(remainingOrCondition);
+     
+      for (const doc of conditionResults) {
+        resultMap.set(doc.id, doc);
+      }
+    }
+    
     const results = Array.from(resultMap.values());
-    const { limit = 1000, offset = 0 } = options;
-    return results.slice(offset, offset + limit);
+    return results;
   }
 
   _documentMatchesConditions(doc, conditions, operator) {

@@ -13,50 +13,84 @@ console.log('✅ Range query:', results.length, 'users aged 25-27');
 */
 
 const query = {
-    whereComplex: {
-        $and: [
-        {
+    where: {
+      //  $and: [
+      //  {
             $or: [
             {
                 $and: [
-                { role: 'developer'},
-                { age: 21 }
+                { role: 'manager'},
+                { age: 46 }
                 ]
             },
             {
                 $and: [
-                { 'role': 'manager' },
-                { age: 38 }
+                { 'role': 'developer' },
+                { age: 21 }
                 ]
-            }
+            },
+            { name: 'Chris White 156'}
             ]
-        },
-        { active: false}
+    //    },
+       // { active: false}
+   //     ]
+    },
+   // like: { name: 'c*' },
+    filter: { active: true },
+    orderBy: 'name desc',
+    limit: 2
+};
+
+
+const query1 = {
+    where: {
+        $and: [
+        // { active: false },
+        { role: 'designer'},
+        // { age: 36 }
         ]
     },
-    // whereLike: { name: 'Chris%' },
+    like: { name: 'c*' },
+ //   orderBy: 'name asc',
+    limit: 5
+};
+const query2 = {
+    where: {
+        role: 'designer',
+        age: 36
+    },
+    like: { name: 'c*' },
+    filter : { active: 'true'},
     orderBy: 'name asc',
+    //offset: 11,
     limit: 5
 };
 
-//var stats = await users.getStats();
-//console.log(JSON.stringify(stats, null, 2));
+var stats = await users.getStats();
+console.log(JSON.stringify(stats, null, 2));
 
 console.time('timer1');
-var results = await users.findAdvanced(query);
+var results = await users.find(query);
 console.timeEnd('timer1');
-//console.log(results);
+console.log(results);
 console.log('----------------------------------\n');
-
-//stats = await users.getStats();
-//console.log(JSON.stringify(stats, null, 2));
+/*
+var stats = await users.getStats();
+console.log(JSON.stringify(stats, null, 2));
 
 console.time('timer2');
-results = await users.findAdvanced(query);
+results = await users.find(query);
 console.timeEnd('timer2');
-//console.log(results);
+console.log(results);
 console.log('----------------------------------\n');
+*/
 
+/*console.time('timer3');
+results = await users.findByFullText('name', 'casey smith');
+console.timeEnd('timer3');
+console.log(results);
+console.log('----------------------------------\n');
+*/
 process.exit();
 
 const rl = readline.createInterface({ input, output });

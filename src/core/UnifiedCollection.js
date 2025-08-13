@@ -27,9 +27,7 @@ class UnifiedCollection {
     this.storage = new DocumentStorage(this.collectionPath, this.maxPerDir);
     
     // Index management
-    this.loadedIndices = new Map();
     this.shardedIndices = new Map();
-    this.useSharding = schema.useSharding !== false;
     
     // Query engines
     this.multiFieldEngine = new MultiFieldQueryEngine(this);
@@ -69,14 +67,13 @@ class UnifiedCollection {
       }
     }
     
-    console.log(`📋 Loaded ${this.loadedIndices.size + this.shardedIndices.size} indices for ${this.name}`);
+    console.log(`📋 Loaded ${this.shardedIndices.size} indices for ${this.name}`);
   }
   
   async rebuildAllIndices() {
     console.log(`🔄 Rebuilding all indices for collection: ${this.name}`);
     
     // Clear existing indices
-    this.loadedIndices.clear();
     this.shardedIndices.clear();
     
     // Remove index files
@@ -148,106 +145,40 @@ class UnifiedCollection {
     });
     
     await Promise.all(indexPromises);
+    
+    // Build composite indices
+    if (this.schema.compositeIndices) {
+      for (const [indexName, fields] of Object.entries(this.schema.compositeIndices)) {
+        console.log(`🔨 Building composite sharded index: ${indexName}`);
+        
+        const compositeIndex = new ShardedIndexManager(
+          this.collectionPath, 
+          fields, // ← Array of fields for composite
+          { shardCount: 16 }
+        );
+        
+        await compositeIndex.buildFromDocuments(() => this.storage.getAllDocuments());
+        this.shardedIndices.set(indexName, compositeIndex);
+      }
+    }
   }
   
   async _buildIndex(field) {
-    if (this.useSharding) {
-      const shardedIndex = new ShardedIndexManager(this.collectionPath, field);
-      const stats = await shardedIndex.buildFromDocuments(() => this.storage.getAllDocuments());
-      this.shardedIndices.set(field, shardedIndex);
-      return stats;
-    } else {
-      const indexManager = new RegularIndexManager(this.collectionPath, field);
-      const stats = await indexManager.buildIndex(() => this.storage.getAllDocuments());
-      this.loadedIndices.set(field, indexManager.index);
-      return stats;
-    }
-  }
-
-  async _saveRegularIndex(field, index) {
-    const indexPath = path.join(this.indicesPath, `${field}.json`);
-    const indexObj = Object.fromEntries(index.entries());
-    
-    const tempPath = `${indexPath}.tmp`;
-    fs.writeFileSync(tempPath, JSON.stringify(indexObj, null, 2));
-    fs.renameSync(tempPath, indexPath);
+    const shardedIndex = new ShardedIndexManager(this.collectionPath, field);
+    const stats = await shardedIndex.buildFromDocuments(() => this.storage.getAllDocuments());
+    this.shardedIndices.set(field, shardedIndex);
+    return stats;
   }
   
   async _loadIndex(field) {
-    if (this.useSharding) {
-      const shardedIndex = new ShardedIndexManager(this.collectionPath, field);
-      this.shardedIndices.set(field, shardedIndex);
-    } else {
-      const indexManager = new RegularIndexManager(this.collectionPath, field);
-      await indexManager.load();
-      this.loadedIndices.set(field, indexManager.index);
-    }
-  }
-
-  async loadDocumentsBatch(docIds, batchSize = 20) {
-    if (docIds.length === 0) return [];
-    
-    // Raggruppa per shard per ottimizzare I/O
-  
-    const shardGroups = this._groupDocumentsByShards(docIds);
-    
-    const results = new Map();
-    const loadPromises = [];
-    
-    // Processa ogni shard in parallelo
-    
-    for (const [shardPath, idsInShard] of shardGroups.entries()) {
-      // Suddividi in batch
-      for (let i = 0; i < idsInShard.length; i += batchSize) {
-        const batch = idsInShard.slice(i, i + batchSize);
-        loadPromises.push(this._loadShardBatch(shardPath, batch, results));
-      }
-    }
-    
-    await Promise.all(loadPromises);
-    
-    // Restituisci nell'ordine originale
-    return docIds.map(id => results.get(id)).filter(doc => doc !== null);
-  }
-  
-  _groupDocumentsByShards(docIds) {
-    const groups = new Map();
-    
-    for (const id of docIds) {
-      const shardPath = this.storage.getDocumentPath(id);
-      const shardDir = path.dirname(shardPath);
-      
-      if (!groups.has(shardDir)) {
-        groups.set(shardDir, []);
-      }
-      groups.get(shardDir).push({ id, path: shardPath });
-      
-    }
-    
-    return groups;
-  }
-  
-  async _loadShardBatch(shardPath, batch, resultsMap) {
-    const loadPromises = batch.map(async ({ id, path }) => {
-      try {
-        if (fs.existsSync(path)) {
-          const doc = JSON.parse(fs.readFileSync(path, 'utf8'));
-          resultsMap.set(id, doc);
-        } else {
-          resultsMap.set(id, null);
-        }
-      } catch (e) {
-        console.warn(`⚠️ Error loading document ${id}:`, e.message);
-        resultsMap.set(id, null);
-      }
-    });
-    
-    await Promise.all(loadPromises);
+    const shardedIndex = new ShardedIndexManager(this.collectionPath, field);
+    this.shardedIndices.set(field, shardedIndex);
   }
   
   // ---------- CORE CRUD ----------
 
-  async insert(doc) {
+  async insert(doc, options = {}) {
+    const { updateIndices = true } = options;
     const id = Date.now() + '-' + Math.random().toString(36).slice(2);
     const docWithId = { id, ...doc };
     
@@ -269,7 +200,9 @@ class UnifiedCollection {
     await this.storage.saveDocument(id, docWithId);
     
     // Update indices
-    await this._updateAllIndices(docWithId, 'insert');
+    if (options.updateIndices) {
+      await this._updateAllIndices(docWithId, 'insert');
+    }
     
     return docWithId;
   }
@@ -342,77 +275,12 @@ class UnifiedCollection {
             await shardedIndex.remove(value, doc.id);
           }
         }
-      } else if (this.loadedIndices.has(field)) {
-        const index = this.loadedIndices.get(field);
-        const normalizedValue = ValueNormalizer.normalize(doc[field]);
-        
-        if (operation === 'insert') {
-          if (!index.has(normalizedValue)) index.set(normalizedValue, []);
-          index.get(normalizedValue).push(doc.id);
-        } else if (operation === 'delete') {
-          if (index.has(normalizedValue)) {
-            const ids = index.get(normalizedValue);
-            const idx = ids.indexOf(doc.id);
-            if (idx !== -1) ids.splice(idx, 1);
-            if (ids.length === 0) index.delete(normalizedValue);
-          }
-        }
-        await this._saveRegularIndex(field, index);
       }
     }
   }
 
   // ---------- BASIC QUERIES ----------
-
-  async findByField(field, value, options = {}) {
-    const { limit = 1000, offset = 0 } = options;
-    const indexedFields = SchemaParser.getIndexedFields(this.schema);
-    
-    if (indexedFields.includes(field)) {
-      return await this._indexScan(field, value, limit, offset);
-    } else {
-      return await this._tableScan(field, value, limit, offset);
-    }
-  }
-
-  async _indexScan(field, value, limit, offset) {
-    if (this.shardedIndices.has(field)) {
-      const shardedIndex = this.shardedIndices.get(field);
-      const ids = await shardedIndex.get(value);
-      const paginatedIds = ids.slice(offset, offset + limit);
-      return await this._loadDocuments(paginatedIds);
-    } else if (this.loadedIndices.has(field)) {
-      const index = this.loadedIndices.get(field);
-      const key = ValueNormalizer.normalize(value);
-      const ids = index.get(key) || [];
-      const paginatedIds = ids.slice(offset, offset + limit);
-      return await this._loadDocuments(paginatedIds);
-    }
-    return [];
-  }
-
-  async _tableScan(field, value, limit, offset) {
-    const results = [];
-    let found = 0;
-    let skipped = 0;
-    
-    const allDocs = await this.storage.getAllDocuments();
-    
-    for (const doc of allDocs) {
-      if (this._documentMatches(doc, field, value)) {
-        if (skipped < offset) {
-          skipped++;
-          continue;
-        }
-        results.push(doc);
-        found++;
-        if (results.length >= limit) break;
-      }
-    }
-    
-    return results;
-  }
-
+  
   async findByRange(field, min, max, options = {}) {
     const { limit = 1000 } = options;
     const indexedFields = SchemaParser.getIndexedFields(this.schema);
@@ -428,14 +296,6 @@ class UnifiedCollection {
       // Range queries on sharded indices are expensive - need to check all shards
       const allKeys = await shardedIndex._getAllKeys();
       for (const [key, ids] of allKeys.entries()) {
-        const numValue = parseFloat(key);
-        if (!isNaN(numValue) && numValue >= min && numValue <= max) {
-          matchingIds.push(...ids);
-        }
-      }
-    } else if (this.loadedIndices.has(field)) {
-      const index = this.loadedIndices.get(field);
-      for (const [key, ids] of index.entries()) {
         const numValue = parseFloat(key);
         if (!isNaN(numValue) && numValue >= min && numValue <= max) {
           matchingIds.push(...ids);
@@ -461,8 +321,6 @@ class UnifiedCollection {
     return await this.multiFieldEngine.findByComplex(query, options);
   }
 
-  // ---------- LIKE QUERIES (Delegated) ----------
-
   async findByLike(field, pattern, options = {}) {
     return await this.likeEngine.findByLike(field, pattern, options);
   }
@@ -487,35 +345,40 @@ class UnifiedCollection {
 
   // ---------- ADVANCED COMBINED QUERIES ----------
 
-  async findAdvanced(options = {}) {
+  async find(query) {
     const {
-      where = {},
-      whereLike = {},
-      whereComplex = null,
+      where = null,
+      like = {},
+      filter = {},
       orderBy = null,
       limit = 1000,
       offset = 0,
       populate = []
-    } = options;
+    } = query;
+    
+    let response = {};
     
     let results = [];
     
     // Execute primary query
-    if (whereComplex) {
-      results = await this.findByComplex(whereComplex, { limit: limit * 2 });
-    } else if (Object.keys(where).length > 1) {
-      results = await this.findByAnd(where, { limit: limit * 2 });
-    } else if (Object.keys(where).length === 1) {
-      const field = Object.keys(where)[0];
-      const value = where[field];
-      results = await this.findByField(field, value, { limit: limit * 2 });
+    if (where) {
+      results = await this.findByComplex(where);
     } else {
       results = await this.storage.getAllDocuments();
     }
     
+    // Apply filters
+    if (Object.keys(filter).length > 0) {
+      for (const [field, value] of Object.entries(filter)) {
+        results = results.filter(doc => 
+          this._documentMatches(doc, field, value)
+        );
+      }
+    }
+    
     // Apply LIKE filters
-    if (Object.keys(whereLike).length > 0) {
-      for (const [field, pattern] of Object.entries(whereLike)) {
+    if (Object.keys(like).length > 0) {
+      for (const [field, pattern] of Object.entries(like)) {
         const patternInfo = PatternMatcher.analyzePattern(pattern);
         results = results.filter(doc => 
           PatternMatcher.documentMatches(doc, field, patternInfo)
@@ -529,15 +392,21 @@ class UnifiedCollection {
       results = this.orderByEngine._applySortInMemory(results, orderFields);
     }
     
+    response['size'] = results.length;
+    response['limit'] = limit;
+    response['offset'] = offset;
+    
     // Apply pagination
-    const paginated = results.slice(offset, offset + limit);
+    results = results.slice(offset, offset + limit);
     
     // Apply population
     if (populate.length > 0) {
-      return await this.relationEngine.populate(paginated, ...populate);
+      return await this.relationEngine.populate(results, ...populate);
     }
     
-    return paginated;
+    response['results'] = results;
+    
+    return response;
   }
 
   // ---------- RELATIONS (Delegated) ----------
@@ -556,13 +425,6 @@ class UnifiedCollection {
     const loadPromises = docIds.map(id => this.storage.loadDocument(id));
     const docs = await Promise.all(loadPromises);
     return docs.filter(doc => doc !== null);
-  }
-
-  async _loadDocuments_(docIds) {
-    if (docIds.length === 0) return [];
-    
-    // Usa batch loading per performance migliori
-    return await this.loadDocumentsBatch(docIds, 20);
   }
   
   _documentMatches(doc, field, value) {
@@ -584,7 +446,6 @@ class UnifiedCollection {
       relations: this.schema.relations,
       indexedFields: SchemaParser.getIndexedFields(this.schema),
       validateRelations: this.schema.validateRelations,
-      useSharding: this.useSharding
     };
   }
 
@@ -592,19 +453,14 @@ class UnifiedCollection {
     const stats = {
       collection: this.name,
       schema: this.getSchema(),
-      indices: { regular: {}, sharded: [] }
+      indices: []
     };
     
-    for (const [field, index] of this.loadedIndices.entries()) {
-      stats.indices.regular[field] = {
-        uniqueValues: index.size,
-        memoryMB: Math.round(JSON.stringify(Object.fromEntries(index)).length / 1024 / 1024 * 100) / 100
-      };
-    }
-    
+    console.log(this.shardedIndices);
     for (const [field, shardedIndex] of this.shardedIndices.entries()) {
+      
       const shardIndexStats = await shardedIndex.getStats();
-      stats.indices.sharded.push(shardIndexStats);
+      stats.indices.push(shardIndexStats);
     }
     
     return stats;
