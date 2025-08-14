@@ -67,16 +67,17 @@ const query2 = {
 
 const query3 = {
     where: {
-        $or: [
+        $and: [
             { role: 'designer' },
             { age: 24 },
-            //{ active: true }
+            { active: true }
         ]
     },
     //like: { name: '*3335*' },
-    filter: { role: 'manager'},
-    orderBy: 'role desc',
-    limit: 2
+    //filter: { role: 'manager'},
+    orderBy: 'id asc',
+    offset: 0,
+    limit: 20
 };
 
 //var stats = await users.getStats();
