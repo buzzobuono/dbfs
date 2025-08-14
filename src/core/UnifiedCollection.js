@@ -53,28 +53,10 @@ class UnifiedCollection {
       return;
     }
     
-    //const indexedFields = SchemaParser.getIndexedFields(this.schema);
-    //const indexFiles = fs.readdirSync(this.indicesPath).filter(f => f.endsWith('.json'));
-    //
-    //for (const indexFile of indexFiles) {
-    //  const fieldName = indexFile.replace('.json', '').replace(/_shard\d+/, '');
-    //  
-    //  if (indexedFields.includes(fieldName)) {
-    //    await this._loadIndex(fieldName);
-    //    console.log(`✅ Loaded index for field: ${fieldName}`);
-    //  }
-    //}
-    
-    const indices = this.schema.indices;
-    const indexFiles = fs.readdirSync(this.indicesPath).filter(f => f.endsWith('.json'));
-    
-    for (const indexFile of indexFiles) {
-      const indexName = indexFile.replace('.json', '').replace(/_shard\d+/, '');
-      
-      if (indices.hasOwnProperty(indexName)) {
-        await this._loadIndex(indexName, this.schema.indices[indexName]);
-        console.log(`✅ Loaded index: ${indexName}`);
-      }
+    const indices = Object.keys(this.schema.indices);
+    for (const indexName of indices) {
+      await this._loadIndex(indexName, this.schema.indices[indexName]);
+      console.log(`✅ Loaded index: ${indexName}`);
     }
     console.log(`📋 Loaded ${this.shardedIndices.size} indices for ${this.name}`);
   }

@@ -18,16 +18,7 @@ class IndexManager {
   }
   
   _generateCompositeKey(values) {
-    // values può essere un documento o array di valori
-    let keyValues;
-    if (Array.isArray(values)) {
-      keyValues = values;
-    } else {
-      // Extract values from document for each field
-      keyValues = this.fields.map(field => values[field]);
-    }
-    
-    return keyValues
+    return values
       .map(v => ValueNormalizer.normalize(v))
       .join('|');
   }
@@ -115,13 +106,6 @@ class IndexManager {
     this.loadedShards.set(shardKey, shard);
   }
 
-  async get(value) {
-    const shardKey = this._getShardKey(value);
-    const shard = await this._loadShard(shardKey);
-    const normalizedValue = ValueNormalizer.normalize(value);
-    return shard.get(normalizedValue) || [];
-  }
-
   async _saveShard(shardKey) {
     const shard = this.loadedShards.get(shardKey);
     if (!shard) return;
@@ -145,7 +129,6 @@ class IndexManager {
     const compositeKey = this._generateCompositeKey(values);
     const shardKey = this._getShardKey(values);
     const shard = await this._loadShard(shardKey);
-    
     return shard.get(compositeKey) || [];
   }
 

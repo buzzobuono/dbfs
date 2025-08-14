@@ -20,25 +20,12 @@ class MultiFieldQueryEngine {
   async _indexScan(field, value) {
     if (this.collection.shardedIndices.has(field)) {
       const shardedIndex = this.collection.shardedIndices.get(field);
-      const ids = await shardedIndex.get(value);
+      const ids = await shardedIndex.getExact([value]);
       return await this.collection._loadDocuments(ids);
     }
     return [];
   }
-
-  async _tableScan(field, value) {
-    const results = [];
-
-    const allDocs = await this.storage.getAllDocuments();
-
-    for (const doc of allDocs) {
-      if (this._documentMatches(doc, field, value)) {
-        results.push(doc);
-      }
-    }
-
-    return results;
-  }
+  
   async findByAnd(conditions) {
     const strategy = await this._planAndQuery(conditions);
 
@@ -91,7 +78,10 @@ class MultiFieldQueryEngine {
 
     // Fall back to single field analysis
     const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
-    const fields = Object.keys(conditions);
+    const fields = [];
+    for (const condition of conditions) {
+      fields.push(Object.keys(condition)[0]);
+    }
     const selectivity = {};
     for (const field of fields) {
       if (indexedFields.includes(field)) {
@@ -215,7 +205,10 @@ class MultiFieldQueryEngine {
   }
 
   async _planOrQuery(conditions) {
-    const fields = Object.keys(conditions);
+    const fields = [];
+    for (const condition of conditions) {
+      fields.push(Object.keys(condition)[0]);
+    }
     const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
 
     const indexedConditions = [];
@@ -323,9 +316,9 @@ class MultiFieldQueryEngine {
     const resultMap = new Map();
 
     for (const field of strategy.indexedFields) {
-      const value = conditions[field];
-      const results = await this.findByField(field, value, { limit: 5000 });
-
+      const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
+      const value = condition[field]
+      const results = await this.findByField(field, value);
       for (const doc of results) {
         resultMap.set(doc.id, doc);
       }
@@ -347,7 +340,7 @@ class MultiFieldQueryEngine {
     const results = Array.from(resultMap.values());
     return results;
   }
-
+  
   async _executeTableScanAndQuery(conditions) {
     const results = [];
 
@@ -505,20 +498,7 @@ class MultiFieldQueryEngine {
   _getNestedValue(obj, path) {
     return path.split('.').reduce((current, key) => current && current[key], obj);
   }
-
-  async explain(query) {
-    const conditions = query;
-    const fields = Object.keys(conditions);
-    const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
-
-    return {
-      type: 'SIMPLE_MULTI_FIELD',
-      fields: fields,
-      indexedFields: fields.filter(f => indexedFields.includes(f)),
-      nonIndexedFields: fields.filter(f => !indexedFields.includes(f)),
-      strategy: fields.filter(f => indexedFields.includes(f)).length > 0 ? 'INDEX_INTERSECT' : 'TABLE_SCAN'
-    };
-  }
+  
 }
 
 export default MultiFieldQueryEngine;

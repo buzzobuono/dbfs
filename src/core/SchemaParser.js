@@ -79,15 +79,9 @@ class SchemaParser {
   static getIndexedFields(schema) {
     const indexed = [];
     
-    for (const [fieldName, fieldDef] of Object.entries(schema.fields)) {
-      if (fieldDef.indexed || (typeof fieldDef === 'object' && fieldDef.index)) {
-        indexed.push(fieldName);
-      }
-    }
-    
-    for (const relationField of Object.keys(schema.relations)) {
-      if (!indexed.includes(relationField)) {
-        indexed.push(relationField);
+    for (const [indexName, fields] of Object.entries(schema.indices)) {
+      if (fields.length == 1) {
+        indexed.push(fields[0]);
       }
     }
     
