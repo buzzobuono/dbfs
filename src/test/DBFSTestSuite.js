@@ -70,7 +70,7 @@ const query3 = {
         $and: [
             { role: 'designer' },
             { age: 24 },
-            { active: true }
+            { active: false }
         ]
     },
     //like: { name: '*3335*' },
