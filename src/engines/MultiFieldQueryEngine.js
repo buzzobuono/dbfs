@@ -73,6 +73,9 @@ class MultiFieldQueryEngine {
         compositeIndex: compositeMatch.compositeIndex,
         matchedFields: compositeMatch.matchedFields,
         unmatchedFields: compositeMatch.unmatchedFields,
+        exactMatch: compositeMatch.exactMatch,
+        prefixOptimal: compositeMatch.prefixOptimal,
+        coverageRatio: compositeMatch.coverageRatio,
         estimatedCost: 10, // Very low cost
         reason: `Using composite index '${compositeMatch.indexName}' for ${compositeMatch.matchedFields.length}/${conditions.length} fields`
       };
@@ -157,7 +160,7 @@ class MultiFieldQueryEngine {
         bestMatch = match;
       }
     }
-    console.log(bestMatch.coverageRatio);
+  
     return bestMatch && bestMatch.coverageRatio >= 0.66 ? bestMatch : null; // Require at least 2 matching fields
   }
 
@@ -198,7 +201,7 @@ class MultiFieldQueryEngine {
     // 2. Percentage of query covered (higher is better)
     // 3. Whether it's an exact match (bonus)
     const coverageRatio = matchedFields.length / conditions.length;
-    const exactMatch = matchedFields.length === candidate.fields.length;
+    const exactMatch = matchedFields.length === manager.fields.length;
     const prefixOptimal = consecutiveMatches === matchedFields.length;
 
     let score = consecutiveMatches * 10; // Base score
@@ -270,14 +273,17 @@ class MultiFieldQueryEngine {
     
     let candidateIds;
 
-    if (unmatchedFields.length === 0) {
+    if (strategy.exactMatch) {
       // Perfect match - use exact query
       console.log(`🎯 Exact composite match on [${matchedFields.join(', ')}]`);
       candidateIds = await compositeIndex.getExact(matchedValues);
-    } else {
+    } else if (strategy.prefixOptimal) {
       // Partial match - use prefix query
       console.log(`🎯 Prefix composite match on [${matchedFields.join(', ')}], filtering [${unmatchedFields.join(', ')}]`);
       candidateIds = await compositeIndex.getPrefix(matchedValues);
+    } else {
+      console.log(`🎯 Partial composite match on [${matchedFields.join(', ')}], filtering [${unmatchedFields.join(', ')}]`);
+      candidateIds = await compositeIndex.getPartialMatch(matchedValues);
     }
 
     if (candidateIds.length === 0) {
@@ -306,28 +312,7 @@ class MultiFieldQueryEngine {
 
     return results;
   }
-
-  async _executeIndexedAndQuery__(conditions, strategy) {
-    if (strategy.strategy === 'COMPOSITE_INDEX') {
-      return await this._executeCompositeIndexQuery(conditions, strategy);
-    }
-
-    const startField = strategy.startField;
-    const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, startField));
-    const startValue = condition[startField];
-    
-    const candidates = await this.findByField(startField, startValue);
-
-    const remainingConditions = { ...conditions };
-    delete remainingConditions[startField];
-
-    let filtered = candidates;
-    for (const [field, value] of Object.entries(remainingConditions)) {
-      filtered = filtered.filter(doc => this._matchesCondition(doc, field, value));
-    }
-
-    return filtered;
-  }
+  
   
 async _executeIndexedAndQuery(conditions, strategy) {
   if (strategy.strategy === 'COMPOSITE_INDEX') {
@@ -391,12 +376,13 @@ async _executeIndexedAndQuery(conditions, strategy) {
     }
 
     if (strategy.nonIndexedFields.length > 0) {
-      const nonIndexedConditions = {};
+      const nonIndexedConditions = [];
       for (const field of strategy.nonIndexedFields) {
-        nonIndexedConditions[field] = conditions[field];
+        const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
+        nonIndexedConditions.push(condition);
       }
 
-      const tableScanResults = await this._executeTableScanOrQuery(nonIndexedConditions, 5000, 0);
+      const tableScanResults = await this._executeTableScanOrQuery(nonIndexedConditions);
 
       for (const doc of tableScanResults) {
         resultMap.set(doc.id, doc);
@@ -408,7 +394,8 @@ async _executeIndexedAndQuery(conditions, strategy) {
   }
   
   async _executeTableScanAndQuery(conditions) {
-    console.log('Table scan for conditions ' + conditions);
+    console.log('Table scan for fields [' + conditions.map(cond => Object.keys(cond)[0]).join(',') + '], operator AND');
+    
     const results = [];
 
     const allDocs = await this.collection.storage.getAllDocuments();
@@ -423,8 +410,9 @@ async _executeIndexedAndQuery(conditions, strategy) {
   }
 
   async _executeTableScanOrQuery(conditions) {
+    console.log('Table scan for fields [' + conditions.map(cond => Object.keys(cond)[0]).join(',') + '], operator OR');
+   
     const resultMap = new Map();
-
     const allDocs = await this.collection.storage.getAllDocuments();
 
     for (const doc of allDocs) {
@@ -521,25 +509,6 @@ async _executeIndexedAndQuery(conditions, strategy) {
 
     const results = Array.from(resultMap.values());
     return results;
-  }
-
-  _documentMatchesConditions_buggy(doc, conditions, operator) {
-    const matches = [];
-
-    conditions.every(cond => {
-      const [field, value] = Object.entries(cond)[0];
-      const match = this._matchesCondition(doc, field, value);
-      matches.push(match);
-      return match;
-    });
-    
-    if (operator === 'AND') {
-      return matches.every(m => m);
-    } else if (operator === 'OR') {
-      return matches.some(m => m);
-    }
-
-    return false;
   }
 
   _documentMatchesConditions(doc, conditions, operator) {

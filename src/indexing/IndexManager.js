@@ -18,7 +18,15 @@ class IndexManager {
   }
   
   _generateCompositeKey(values) {
-    return values
+    // values può essere un documento o array di valori
+    let keyValues;
+    if (Array.isArray(values)) {
+      keyValues = values;
+    } else {
+      // Extract values from document for each field
+      keyValues = this.fields.map(field => values[field]);
+    }
+    return keyValues
       .map(v => ValueNormalizer.normalize(v))
       .join('|');
   }

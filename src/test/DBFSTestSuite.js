@@ -14,30 +14,30 @@ console.log('✅ Range query:', results.length, 'users aged 25-27');
 
 const query = {
     where: {
-        $or: [
+        $and: [
             {
                 $or: [
                     {
                         $and: [
-                           // { role: 'designer' },
-                            { age: 21 }
+                            { role: 'designer' },
+                            { age: 29 }
                         ]
                     },
                     {
                         $and: [
-                            //{ 'role': 'manager' },
-                            { age: 36 }
+                            { 'role': 'developer' },
+                            { age: 33 }
                         ]
                     }
                 ]
             },
-            { name: 'Morgan Smith 3335' }
+            { active: true }
         ]
     },
     //like: { name: '*3335*' },
     //filter: { active: true },
-    orderBy: 'age desc',
-    limit: 2
+    orderBy: 'name desc',
+    limit: 6
 };
 
 
@@ -68,16 +68,17 @@ const query2 = {
 const query3 = {
     where: {
         $and: [
-            { role: 'designer' },
-            { age: 24 },
-            { active: false }
+        { active: true },
+            { role: 'developer' }
+        //    { age: 33 },
+            
         ]
     },
     //like: { name: '*3335*' },
     //filter: { role: 'manager'},
     orderBy: 'id asc',
     offset: 0,
-    limit: 20
+    limit: 2
 };
 
 //var stats = await users.getStats();
