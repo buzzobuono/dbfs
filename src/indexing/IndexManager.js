@@ -194,29 +194,6 @@ class IndexManager {
     
     return [...new Set(results)];
   }
-
-  async getPartialMatch(conditions) {
-    // Build partial key from available conditions
-    const partialValues = this.fields.map(field => 
-      conditions.hasOwnProperty(field) ? conditions[field] : null
-    );
-    
-    // Find first null value (incomplete key)
-    const completeLength = partialValues.findIndex(v => v === null);
-    const actualLength = completeLength === -1 ? partialValues.length : completeLength;
-    
-    if (actualLength === 0) {
-      throw new Error('At least one field value required for partial match');
-    }
-    
-    if (actualLength === this.fields.length) {
-      // Complete key - use exact match
-      return await this.getExact(partialValues);
-    } else {
-      // Partial key - use prefix match
-      return await this.getPrefix(partialValues.slice(0, actualLength));
-    }
-  }
   
   async buildFromDocuments(getAllDocuments) {
     console.log(`🏗️ Building sharded index for: ${this.fields.join(', ')}`);
@@ -276,7 +253,7 @@ class IndexManager {
     return this.getStats();
   }
   
-  async _getAllKeys() {
+  async getAllKeys() {
     const allKeys = new Map();
     
     for (let shardKey = 0; shardKey < this.shardCount; shardKey++) {
@@ -293,7 +270,6 @@ class IndexManager {
         // Skip missing shards
       }
     }
-    
     return allKeys;
   }
 

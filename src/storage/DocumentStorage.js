@@ -98,6 +98,30 @@ class DocumentStorage {
     
     return docs;
   }
+  
+  async countDocuments() {
+    let count = 0;
+    
+    for (let shard = 0; shard < 256; shard++) {
+      const shardName = String(shard).padStart(3, '0');
+      const shardPath = path.join(this.collectionPath, shardName);
+      
+      if (fs.existsSync(shardPath)) {
+        const subShards = fs.readdirSync(shardPath).filter(f =>
+          fs.statSync(path.join(shardPath, f)).isDirectory()
+        );
+        
+        for (const subShard of subShards) {
+          const subShardPath = path.join(shardPath, subShard);
+          const files = fs.readdirSync(subShardPath).filter(f => f.endsWith('.json'));
+          count += files.length;
+        }
+      }
+    }
+    
+    return count;
+  }
+  
 }
 
 export default DocumentStorage;

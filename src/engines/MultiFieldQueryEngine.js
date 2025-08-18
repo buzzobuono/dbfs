@@ -31,7 +31,7 @@ class MultiFieldQueryEngine {
   async findByAnd(conditions) {
     const strategy = await this._planAndQuery(conditions);
 
-    console.log('Plan And Query\n Conditions:');
+    console.log('### Best Plan And Query ###\n Conditions:');
     console.log(conditions);
     console.log('Strategy:');
     console.log(strategy)
@@ -46,7 +46,7 @@ class MultiFieldQueryEngine {
   async findByOr(conditions) {
     const strategy = await this._planOrQuery(conditions);
 
-    console.log('Plan Or Query\n Conditions:');
+    console.log('### Plan Or Query\n Conditions:');
     console.log(conditions);
     console.log('Strategy:');
     console.log(strategy)
@@ -64,74 +64,33 @@ class MultiFieldQueryEngine {
   }
 
   async _planAndQuery(conditions) {
-    const compositeMatch = await this._findBestCompositeIndex(conditions);
-    if (compositeMatch) {
-      return {
-        useIndex: true,
-        strategy: 'COMPOSITE_INDEX',
-        indexName: compositeMatch.indexName,
-        compositeIndex: compositeMatch.compositeIndex,
-        matchedFields: compositeMatch.matchedFields,
-        unmatchedFields: compositeMatch.unmatchedFields,
-        exactMatch: compositeMatch.exactMatch,
-        prefixOptimal: compositeMatch.prefixOptimal,
-        coverageRatio: compositeMatch.coverageRatio,
-        estimatedCost: 10, // Very low cost
-        reason: `Using composite index '${compositeMatch.indexName}' for ${compositeMatch.matchedFields.length}/${conditions.length} fields`
-      };
+    const matches = [];
+    const compositeMatches = await this._evaluateCompositeMatches(conditions);
+    matches.push(...compositeMatches);
+    const intersectMatch = await this._evaluateIntersectMatch(conditions);
+    matches.push(intersectMatch);
+    const fullScanMatch = {
+      useIndex: false,
+      strategy: 'FULL_SCAN',
+      estimatedSelectivity: 1
+    }
+    matches.push(fullScanMatch);
+    
+    console.log(conditions);
+    for (const match of matches) {
+      console.log('Candidate strategy');
+      console.log(match);
     }
     
-    // Fall back to single field analysis
-    const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
-    const fields = [];
-    for (const condition of conditions) {
-      fields.push(Object.keys(condition)[0]);
-    }
+    const mostSelectiveMatch = matches
+       .sort((a, b) => a.estimatedSelectivity - b.estimatedSelectivity)[0];
     
-    const indexedConditions = [];
-    const nonIndexedConditions = [];
-
-    for (const field of fields) {
-      if (indexedFields.includes(field)) {
-        indexedConditions.push(field);
-      } else {
-        nonIndexedConditions.push(field);
-      }
-    }
-
-    if (indexedConditions.length === 0) {
-      return {
-        useIndex: false,
-        strategy: 'TABLE_SCAN',
-        estimatedCost: 10000,
-        reason: 'No indexed fields in query'
-      };
-    }
-    
-    const selectivity = {};
-    for (const field of fields) {
-      if (indexedFields.includes(field)) {
-        const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
-        const stats = await this._getFieldSelectivity(field, condition[field]);
-        selectivity[field] = stats;
-      }
-    }
- 
-    // Ordina indexedConditions per selettività (più selettivo per primo)
-    const sortedIndexedConditions = indexedConditions
-    .sort((a, b) => selectivity[a].estimatedResults - selectivity[b].estimatedResults);
-    
-    return {
-      useIndex: true,
-      strategy: 'INDEX_INTERSECT',
-      indexedFields: indexedConditions,
-      nonIndexedFields: nonIndexedConditions,
-      estimatedCost: 100,
-      reason: `Starting with most selective field '${indexedConditions[0]}'`
-    };
+    console.log('Most selective');
+    console.log(mostSelectiveMatch);
+    return mostSelectiveMatch;
   }
-
-  async _findBestCompositeIndex(conditions) {
+  
+  async _evaluateCompositeMatches(conditions) {
     const candidateIndices = [];
 
     // Check schema-defined composite indices
@@ -145,84 +104,145 @@ class MultiFieldQueryEngine {
       }
     }
 
-    if (candidateIndices.length === 0) {
-      return null;
-    }
-
-    let bestMatch = null;
-    let bestScore = 0;
-
+    let matches = [];
     for (const candidate of candidateIndices) {
       const match = this._evaluateCompositeMatch(candidate, conditions);
-
-      if (match && match.score > bestScore) {
-        bestScore = match.score;
-        bestMatch = match;
-      }
+      matches.push(match);
     }
   
-    return bestMatch && bestMatch.coverageRatio >= 0.66 ? bestMatch : null; // Require at least 2 matching fields
+    return matches;
   }
-
+  
   _evaluateCompositeMatch(candidate, conditions) {
     const { indexName, fields: indexFields, manager } = candidate;
 
     if (!manager) return null; // Index not available
-
-    const matchedFields = [];
-    const unmatchedFields = [];
-
-    // Check prefix matching (fields must match in order for optimal performance)
-    let consecutiveMatches = 0;
-    for (let i = 0; i < indexFields.length; i++) {
-      const indexField = indexFields[i];
-
-      if (conditions.some(obj => indexField in obj)) {
-        matchedFields.push(indexField);
-        consecutiveMatches++;
-      } else {
-        break; 
-      }
-    }
-
-    // Find unmatched query fields
+    
+    const indexedFields = [];
+    const nonIndexedFields = [];
+    
+    let indexPosition = 0;
+    let queryFields = [];
     for (const condition of conditions) {
       let queryField = Object.keys(condition)[0];
-      if (!matchedFields.includes(queryField)) {
-        unmatchedFields.push(queryField);
+      queryFields.push(queryField);
+    }
+    
+    // Trova il prefisso consecutivo più lungo
+    for (let i = 0; i < queryFields.length; i++) {
+      const queryField = queryFields[i];
+      
+      if (indexPosition < indexFields.length && queryField === indexFields[indexPosition]) {
+        // Campo trovato nella posizione consecutiva corretta
+        indexedFields.push(queryField);
+        indexPosition++;
+      } else {
+        // Interruzione del prefisso - tutti i restanti vanno in non-indexed
+        nonIndexedFields.push(...queryFields.slice(i));
+        break;
       }
     }
-    if (consecutiveMatches === 0) {
-      return null;
+    
+    const prefixLength = indexedFields.length;
+    const indexCoverage = queryFields.length > 0 ? prefixLength / queryFields.length : 0;
+    
+    // Determina il tipo di match possibile
+    const canUseExactMatch = prefixLength === queryFields.length
+      && prefixLength === indexFields.length;
+    
+    const canUsePrefixMatch = prefixLength > 0
+      && prefixLength < indexFields.length;
+    
+    const canUseIndexSeek = prefixLength > 0;
+    
+    let useIndex = canUseExactMatch || canUsePrefixMatch || canUseIndexSeek;
+    let strategy;
+    if (canUseExactMatch) {
+      strategy = 'EXACT_MATCH';
+    } else if (canUsePrefixMatch) {
+      strategy = 'PREFIX_MATCH';
+    } else if (canUseIndexSeek) {
+      strategy = 'INDEX_SEEK_FILTER';
+    }  else {
+      strategy = 'NONE';
     }
-
-    // Calculate score based on:
-    // 1. Number of consecutive matches (higher is better)
-    // 2. Percentage of query covered (higher is better)
-    // 3. Whether it's an exact match (bonus)
-    const coverageRatio = matchedFields.length / conditions.length;
-    const exactMatch = matchedFields.length === manager.fields.length;
-    const prefixOptimal = consecutiveMatches === matchedFields.length;
-
-    let score = consecutiveMatches * 10; // Base score
-    score += coverageRatio * 5; // Coverage bonus
-    if (exactMatch) score += 20; // Exact match bonus
-    if (prefixOptimal) score += 10; // Prefix optimization bonus
-
-    return {
-      indexName,
-      compositeIndex: manager,
-      matchedFields,
-      unmatchedFields,
-      consecutiveMatches,
-      coverageRatio,
-      exactMatch,
-      prefixOptimal,
-      score,
-      estimatedSelectivity: Math.pow(0.1, matchedFields.length) // Rough estimate
+    
+    let match = {
+      useIndex,
+      strategy,
+      indexManager: manager,
+      indexedFields,
+      nonIndexedFields,
+      prefixLength,
+      indexCoverage: Math.round(indexCoverage * 100) / 100,
+      canUseIndexSeek,
+      canUseExactMatch,
+      canUsePrefixMatch,
+      estimatedSelectivity: Math.pow(0.1, prefixLength),
+      indexUtilization: indexFields.length > 0 ? prefixLength / indexFields.length : 0
     };
+    return match;
   }
+  
+  async _evaluateIntersectMatch(conditions) {
+    const indexedFields = SchemaParser.getIndexedFields(this.collection.schema);
+    const fields = [];
+    for (const condition of conditions) {
+      fields.push(Object.keys(condition)[0]);
+    }
+    
+    let canUseIndexIntersect= false;
+    
+    const indexedConditions = [];
+    const nonIndexedConditions = [];
 
+    const indexManagers = [];
+    
+    const estimatedResults = {};
+    
+    for (const field of fields) {
+      if (indexedFields.includes(field)) {
+        const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
+        const value = await this._getEstimatedResults(field, condition[field]);
+        estimatedResults[field] = value;
+      }
+    }
+ 
+    // Ordina indexedConditions per selettività (più selettivo per primo)
+    const sortedIndexedConditions = indexedConditions
+    .sort((a, b) => estimatedResults[a] - estimatedResults[b]);
+    
+    for (const field of fields) {
+      if (indexedFields.includes(field)) {
+        indexedConditions.push(field);
+        indexManagers.push(this.collection.shardedIndices.get(field));
+        canUseIndexIntersect = true;
+      } else {
+        nonIndexedConditions.push(field);
+      }
+    }
+    
+    let useIndex = canUseIndexIntersect;
+    
+    let strategy = 'NONE';
+    if (canUseIndexIntersect) {
+      strategy = 'INDEX_INTERSECT';
+    }
+    
+    let match = {
+      useIndex,
+      strategy,
+      indexedFields: indexedConditions,
+      nonIndexedFields: nonIndexedConditions,
+      numIndices: indexedConditions.length,
+      indexManagers,
+      canUseIndexIntersect,
+      estimatedSelectivity: ( 0.1 / indexedConditions.length)
+    };
+    
+    return match;
+  }
+  
   async _planOrQuery(conditions) {
     const fields = [];
     for (const condition of conditions) {
@@ -246,45 +266,42 @@ class MultiFieldQueryEngine {
     }
 
     return {
+      strategy: 'INDEX_UNION',
       useIndex: true,
       indexedFields: indexedConditions,
-      nonIndexedFields: nonIndexedConditions,
-      strategy: 'INDEX_UNION'
+      nonIndexedFields: nonIndexedConditions
     };
   }
-
-  async _getFieldSelectivity(field, value) {
+  
+  async _getEstimatedResults(field, value) {
     if (this.collection.shardedIndices.has(field)) {
       const shardedIndex = this.collection.shardedIndices.get(field);
       const results = await shardedIndex.getExact([value]);
-      return { estimatedResults: results.length };
+      return results.length ;
     }
-    return { estimatedResults: 10000 }; // High estimate for non-indexed
+    return 10000; // High estimate for non-indexed
   }
-
+  
   async _executeCompositeIndexQuery(conditions, strategy) {
-    const { compositeIndex, matchedFields, unmatchedFields } = strategy;
+    const { indexManager, indexedFields, nonIndexedFields } = strategy;
 
     // Extract values for matched fields in correct order
-    const matchedValues = matchedFields.map(field => {
+    const matchedValues = indexedFields.map(field => {
       const found = conditions.find(obj => Object.prototype.hasOwnProperty.call(obj, field));
       return found ? found[field] : undefined;
     });
     
     let candidateIds;
 
-    if (strategy.exactMatch) {
+    if (nonIndexedFields.length == 0) {
       // Perfect match - use exact query
-      console.log(`🎯 Exact composite match on [${matchedFields.join(', ')}]`);
+      console.log(`🎯 Exact composite match on [${indexedFields.join(', ')}]`);
       candidateIds = await compositeIndex.getExact(matchedValues);
-    } else if (strategy.prefixOptimal) {
-      // Partial match - use prefix query
-      console.log(`🎯 Prefix composite match on [${matchedFields.join(', ')}], filtering [${unmatchedFields.join(', ')}]`);
-      candidateIds = await compositeIndex.getPrefix(matchedValues);
     } else {
-      console.log(`🎯 Partial composite match on [${matchedFields.join(', ')}], filtering [${unmatchedFields.join(', ')}]`);
-      candidateIds = await compositeIndex.getPartialMatch(matchedValues);
-    }
+      // Partial match - use prefix query
+      console.log(`🎯 Prefix composite match on [${indexedFields.join(', ')}], filtering [${nonIndexedFields.join(', ')}]`);
+      candidateIds = await compositeIndex.getPrefix(matchedValues);
+    } 
 
     if (candidateIds.length === 0) {
       return [];
@@ -313,55 +330,122 @@ class MultiFieldQueryEngine {
     return results;
   }
   
-  
-async _executeIndexedAndQuery(conditions, strategy) {
-  if (strategy.strategy === 'COMPOSITE_INDEX') {
-    return await this._executeCompositeIndexQuery(conditions, strategy);
-  }
-  
-  let resultIds = null;
-  let isFirstIteration = true;
-
-  // Processa tutti i campi indicizzati
-  for (const field of strategy.indexedFields) {
-    const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
-    const value = condition[field];
-    
-    const shardedIndex = this.collection.shardedIndices.get(field);
-    const idsResults = await shardedIndex.getExact([value]);
-    
-    if (isFirstIteration) {
-      resultIds = idsResults;
-      isFirstIteration = false;
+  async _executeIndexedAndQuery(conditions, strategy) {
+    if (strategy.strategy === 'EXACT_MATCH') {
+      return await this._executeExactMatch(conditions, strategy);
+    } else if (strategy.strategy === 'PREFIX_MATCH') {
+      return await this._executePrefixMatch(conditions, strategy);
+    } else if (strategy.strategy === 'INDEX_INTERSECT') {
+      return await this._executeIndexIntersect(conditions, strategy);
+    } else if (strategy.strategy === 'INDEX_SEEK_FILTER') {
+      return await this._executeIndexSeekFilter(conditions, strategy);
     } else {
-      resultIds = resultIds.filter(id => idsResults.includes(id));
-    }
-    
-    if (resultIds.length === 0) {
-      return [];
+      error
     }
   }
   
-  let resultDocuments = await this.collection._loadDocuments(resultIds);
-  
-  // Applica le condizioni sui campi non indicizzati
-  if (strategy.nonIndexedFields.length > 0) {
+  async _executeExactMatch(conditions, strategy) {
+    const { indexedFields, nonIndexedFields, indexManager } = strategy;
     
-    for (const field of strategy.nonIndexedFields) {
+    console.log(`Executing Exact Match on [${indexedFields.join(', ')}]`);
+    
+    if (nonIndexedFields.length != 0) {
+      throw new Error("Incoerent input for Exact Match strategy");
+    }
+    
+    const values = [];
+    for (const condition of conditions) {
+      let field = Object.keys(condition)[0];
+      values.push(condition[field]);
+    }
+    const resultIds = await indexManager.getExact(values);
+    const results = await this.collection._loadDocuments(resultIds);
+    return results;
+  }
+  
+  async _executePrefixMatch(conditions, strategy) {
+    const { indexedFields, nonIndexedFields, indexManager } = strategy;
+    
+    console.log(`Executing Prefix Match on [${indexedFields.join(', ')}]`);
+    
+    if (nonIndexedFields.length != 0) {
+      throw new Error("Incoerent input for Prefix Match strategy");
+    }
+    
+    const values = [];
+    for (const condition of conditions) {
+      let field = Object.keys(condition)[0];
+      values.push(condition[field]);
+    }
+    const resultIds = await indexManager.getPrefix(values);
+    const results = await this.collection._loadDocuments(resultIds);
+    return results;
+  }
+  
+  async _executeIndexSeekFilter(conditions, strategy) {
+    console.log(`Executing Index Seek Filter on [${strategy.indexedFields.join(', ')}], filtering [${strategy.nonIndexedFields.join(', ')}]`);
+ 
+  }
+  
+  async _executeIndexIntersect(conditions, strategy) {
+    const { indexedFields, nonIndexedFields, indexManagers } = strategy;
+    
+    console.log(`Executing Index Intersect for fields [${indexedFields.join(', ')}]`);
+    
+    let resultIds = null;
+    let isFirstIteration = true;
+    
+    for (let i = 0; i < indexedFields.length; i++) {
+      const field = indexedFields[i];
       const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
       const value = condition[field];
-      console.log('In Memory Filter for field ' + field);
-      resultDocuments = resultDocuments.filter(doc => this._matchesCondition(doc, field, value));
+    
+      const indexManager = indexManagers[i];
+      const ids = await indexManager.getExact([value]);
       
-      // Early termination se non ci sono più risultati
-      if (resultDocuments.length === 0) {
+      if (isFirstIteration) {
+        resultIds = ids;
+        isFirstIteration = false;
+      } else {
+        resultIds = resultIds.filter(id => ids.includes(id));
+      }
+      
+      if (resultIds.length === 0) {
         return [];
       }
     }
+    
+    let results = await this.collection._loadDocuments(resultIds);
+    
+    if (nonIndexedFields.length > 0) {
+      
+      results = this._executeInMemoryFilter(results, conditions, strategy);
+      
+    }
+    
+    return results || [];
   }
-
-  return resultDocuments || [];
-}
+  
+  async _executeInMemoryFilter(results, conditions, strategy) {
+    const { indexedFields, nonIndexedFields, indexManagers } = strategy;
+    
+    console.log(`Executing InMemory Filter for fields [${nonIndexedFields.join(', ')}]`);
+    
+    for (const field of nonIndexedFields) {
+      const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
+      const value = condition[field];
+        
+      results = results.filter(doc => this._matchesCondition(doc, field, value));
+        
+      // Early termination se non ci sono più risultati
+      if (results.length === 0) {
+        return [];
+      }
+    }
+    
+    return results;
+    
+  }
   
   async _executeIndexedOrQuery(conditions, strategy) {
     const resultMap = new Map();

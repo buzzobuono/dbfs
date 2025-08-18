@@ -68,10 +68,10 @@ const query2 = {
 const query3 = {
     where: {
         $and: [
+        { age: 33 },
+        { role: 'developer' },
         { active: true },
-            { role: 'developer' }
-        //    { age: 33 },
-            
+        { name: 'Taylor Martin 1'}
         ]
     },
     //like: { name: '*3335*' },
