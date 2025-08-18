@@ -71,13 +71,13 @@ const query2 = {
 const query3 = {
     where: {
         $and: [
-        { age: 33 },
-        { role: 'developer' },
         { active: true },
-        { name: 'Alex Martin 60'},
+            { age: 33 },
+        { role: 'developer' },
+        
         ]
     },
-    like: { name: '*60*' },
+    //like: { name: '*60*' },
     //filter: { role: 'manager'},
     orderBy: 'id asc',
     offset: 0,
@@ -88,7 +88,7 @@ const query3 = {
 //console.log(JSON.stringify(stats, null, 2));
 
 console.time('timer1');
-var results = await users.find(query);
+var results = await users.find(query3);
 console.timeEnd('timer1');
 console.log(results);
 console.log('----------------------------------\n');
