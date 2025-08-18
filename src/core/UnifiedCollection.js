@@ -18,7 +18,7 @@ class UnifiedCollection {
     this.name = name;
     this.schema = SchemaParser.parseSchema(schema);
     this.db = db;
-    this.maxPerDir = schema.maxPerDir || 10000;
+    this.maxPerDir = schema.maxPerDir || 100;
     this.options = options;
     
     // Storage

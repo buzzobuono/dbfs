@@ -373,18 +373,36 @@ class MultiFieldQueryEngine {
     }
     
     const values = [];
-    for (const condition of conditions) {
-      let field = Object.keys(condition)[0];
+    for (let i = 0; i < indexedFields.length; i++) {
+      const field = indexedFields[i];
+      const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
       values.push(condition[field]);
     }
+
     const resultIds = await indexManager.getPrefix(values);
     const results = await this.collection._loadDocuments(resultIds);
     return results;
   }
   
   async _executeIndexSeekFilter(conditions, strategy) {
-    console.log(`Executing Index Seek Filter on [${strategy.indexedFields.join(', ')}], filtering [${strategy.nonIndexedFields.join(', ')}]`);
- 
+    const { indexedFields, nonIndexedFields, indexManager } = strategy;
+
+    console.log(`Executing Index Seek Filter on [${indexedFields.join(', ')}], filtering [${nonIndexedFields.join(', ')}]`);
+    
+    const values = [];
+    for (let i = 0; i < indexedFields.length; i++) {
+      const field = indexedFields[i];
+      const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
+      values.push(condition[field]);
+    }
+    const resultIds = await indexManager.getExact(values);
+
+    let results = await this.collection._loadDocuments(resultIds);
+
+    if (nonIndexedFields.length > 0) {
+      results = await this._executeInMemoryFilter(results, conditions, strategy);      
+    }
+    return results;
   }
   
   async _executeIndexIntersect(conditions, strategy) {
@@ -418,17 +436,15 @@ class MultiFieldQueryEngine {
     let results = await this.collection._loadDocuments(resultIds);
     
     if (nonIndexedFields.length > 0) {
-      
-      results = this._executeInMemoryFilter(results, conditions, strategy);
-      
+      results = await this._executeInMemoryFilter(results, conditions, strategy);      
     }
     
     return results || [];
   }
   
   async _executeInMemoryFilter(results, conditions, strategy) {
-    const { indexedFields, nonIndexedFields, indexManagers } = strategy;
-    
+    const { nonIndexedFields } = strategy;
+
     console.log(`Executing InMemory Filter for fields [${nonIndexedFields.join(', ')}]`);
     
     for (const field of nonIndexedFields) {
@@ -437,7 +453,7 @@ class MultiFieldQueryEngine {
         
       results = results.filter(doc => this._matchesCondition(doc, field, value));
         
-      // Early termination se non ci sono più risultati
+      // Early termination
       if (results.length === 0) {
         return [];
       }

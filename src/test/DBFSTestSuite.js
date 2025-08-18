@@ -19,23 +19,26 @@ const query = {
                 $or: [
                     {
                         $and: [
+                            { age: 29 },
                             { role: 'designer' },
-                            { age: 29 }
+                            { active: true }
                         ]
                     },
                     {
                         $and: [
+                            { age: 33 },
                             { 'role': 'developer' },
-                            { age: 33 }
+                            { active: true },
+                           // { name: 'Alex Martin 60'}
                         ]
                     }
                 ]
-            },
-            { active: true }
+            }
+            
         ]
     },
-    //like: { name: '*3335*' },
-    //filter: { active: true },
+    like: { name: '*martin*' },
+    filter: { active: true },
     orderBy: 'name desc',
     limit: 6
 };
@@ -71,10 +74,10 @@ const query3 = {
         { age: 33 },
         { role: 'developer' },
         { active: true },
-        { name: 'Taylor Martin 1'}
+        { name: 'Alex Martin 60'},
         ]
     },
-    //like: { name: '*3335*' },
+    like: { name: '*60*' },
     //filter: { role: 'manager'},
     orderBy: 'id asc',
     offset: 0,
@@ -85,7 +88,7 @@ const query3 = {
 //console.log(JSON.stringify(stats, null, 2));
 
 console.time('timer1');
-var results = await users.find(query3);
+var results = await users.find(query);
 console.timeEnd('timer1');
 console.log(results);
 console.log('----------------------------------\n');

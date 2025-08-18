@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import { encode, decode } from '@msgpack/msgpack';
 
 class DocumentStorage {
   constructor(collectionPath, subShardCount = 16) {
@@ -34,14 +35,23 @@ class DocumentStorage {
 
   async saveDocument(id, doc) {
     const filePath = this.getDocumentPath(id);
-    fs.writeFileSync(filePath, JSON.stringify(doc, null, 2));
+    const bin = encode(doc);
+    this.safeWriteFileSync(filePath, Buffer.from(bin));
+  }
+
+  safeWriteFileSync(filePath, buffer) {
+    const dir = path.dirname(filePath);
+    const tmp = path.join(dir, `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(tmp, buffer);
+    fs.renameSync(tmp, filePath);
   }
 
   async loadDocument(id) {
     const filePath = this.getDocumentPath(id);
     if (fs.existsSync(filePath)) {
       try {
-        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const buf = fs.readFileSync(filePath);
+        return decode(buf);
       } catch (e) {
         console.warn(`⚠️ Corrupted document: ${id}`);
         return null;
@@ -61,63 +71,58 @@ class DocumentStorage {
 
   async getAllDocuments() {
     const docs = [];
-    
+
     for (let shard = 0; shard < 256; shard++) {
       const shardName = String(shard).padStart(3, '0');
       const shardPath = path.join(this.collectionPath, shardName);
-      
-      if (fs.existsSync(shardPath)) {
-        const shardDocs = await this.getShardDocs(shardPath);
-        docs.push(...shardDocs);
+      if (!fs.existsSync(shardPath)) continue;
+
+      const subShards = fs.readdirSync(shardPath).filter((f) =>
+        fs.statSync(path.join(shardPath, f)).isDirectory()
+      );
+
+      for (const sub of subShards) {
+        const subPath = path.join(shardPath, sub);
+        const files = fs
+          .readdirSync(subPath)
+          .filter((f) => f.endsWith(this.ext));
+
+        for (const file of files) {
+          const full = path.join(subPath, file);
+          try {
+            const buf = fs.readFileSync(full);
+            const doc = decode(buf);
+            docs.push(doc);
+          } catch (e) {
+            console.warn(`\u26a0\ufe0f Corrupted document: ${file}`);
+          }
+        }
       }
     }
-    
+
     return docs;
   }
 
-  async getShardDocs(shardPath) {
-    const docs = [];
-    const subShards = fs.readdirSync(shardPath).filter(f => 
-      fs.statSync(path.join(shardPath, f)).isDirectory()
-    );
-    
-    for (const subShard of subShards) {
-      const subShardPath = path.join(shardPath, subShard);
-      const files = fs.readdirSync(subShardPath).filter(f => f.endsWith('.json'));
-      
-      for (const file of files) {
-        try {
-          const doc = JSON.parse(fs.readFileSync(path.join(subShardPath, file), 'utf8'));
-          docs.push(doc);
-        } catch (e) {
-          console.warn(`⚠️ Corrupted document: ${file}`);
-        }
-      }
-    }
-    
-    return docs;
-  }
-  
   async countDocuments() {
     let count = 0;
-    
+
     for (let shard = 0; shard < 256; shard++) {
       const shardName = String(shard).padStart(3, '0');
       const shardPath = path.join(this.collectionPath, shardName);
-      
-      if (fs.existsSync(shardPath)) {
-        const subShards = fs.readdirSync(shardPath).filter(f =>
-          fs.statSync(path.join(shardPath, f)).isDirectory()
-        );
-        
-        for (const subShard of subShards) {
-          const subShardPath = path.join(shardPath, subShard);
-          const files = fs.readdirSync(subShardPath).filter(f => f.endsWith('.json'));
-          count += files.length;
-        }
+      if (!fs.existsSync(shardPath)) continue;
+
+      const subShards = fs.readdirSync(shardPath).filter((f) =>
+        fs.statSync(path.join(shardPath, f)).isDirectory()
+      );
+
+      for (const sub of subShards) {
+        const subPath = path.join(shardPath, sub);
+        const files = fs
+          .readdirSync(subPath)
+          .filter((f) => f.endsWith(this.ext));
+        count += files.length;
       }
     }
-    
     return count;
   }
 
