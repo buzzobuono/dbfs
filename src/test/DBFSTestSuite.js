@@ -72,8 +72,7 @@ const query3 = {
     where: {
         $or: [
         { age: 33},
-        { role: 'developer' },
-        { active: false },
+        { role: 'developer' }
         ]
     },
     //like: { name: '*60*' },
@@ -83,11 +82,25 @@ const query3 = {
     limit: 2
 };
 
+const query4 = {
+    where: {
+        $or: [
+        { age: 33},
+        { age: 34}
+        ]
+    },
+    //like: { name: '*60*' },
+    //filter: { age: 34},
+    orderBy: 'id asc',
+    offset: 0,
+    limit: 0
+};
+
 //var stats = await users.getStats();
 //console.log(JSON.stringify(stats, null, 2));
 
 console.time('timer1');
-var results = await users.find(query3);
+var results = await users.find(query);
 console.timeEnd('timer1');
 console.log(results);
 console.log('----------------------------------\n');

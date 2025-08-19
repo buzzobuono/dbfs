@@ -76,7 +76,7 @@ class SchemaParser {
     return errors;
   }
 
-  static getSingleFieldIndexedNames(schema) {
+  static getSingleFieldIndexNames(schema) {
     const singleFieldIndexNames = new Map();
     
     for (const [indexName, fields] of Object.entries(schema.indices)) {

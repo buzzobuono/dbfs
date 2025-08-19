@@ -52,7 +52,7 @@ function generateName(index) {
   return `${getRandomElement(firstNames)} ${getRandomElement(lastNames)} ${index}`;
 }
 
-for (let i = 1; i <= 100; i++) {
+for (let i = 1; i <= 10000; i++) {
   const role = getRandomElement(roles);
   const name = generateName(i);
   const email = name.toLowerCase().replace(/\s+/g, '.').replace(/_/g, '') + '@test.com';
