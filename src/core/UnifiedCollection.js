@@ -25,7 +25,7 @@ class UnifiedCollection {
     this.storage = new DocumentStorage(this.collectionPath, this.maxPerDir);
     
     // Index management
-    this.shardedIndices = new Map();
+    this.indices = new Map();
     
     // Query engines
     this.multiFieldEngine = new MultiFieldQueryEngine(this);
@@ -58,14 +58,14 @@ class UnifiedCollection {
       await this._loadIndex(indexName, this.schema.indices[indexName]);
       console.log(`✅ Loaded index: ${indexName}`);
     }
-    console.log(`📋 Loaded ${this.shardedIndices.size} indices for ${this.name}`);
+    console.log(`📋 Loaded ${this.indices.size} indices for ${this.name}`);
   }
   
   async rebuildAllIndices() {
     console.log(`🔄 Rebuilding all indices for collection: ${this.name}`);
     
     // Clear existing indices
-    this.shardedIndices.clear();
+    this.indices.clear();
     
     // Remove index files
     if (fs.existsSync(this.indicesPath)) {
@@ -126,32 +126,30 @@ class UnifiedCollection {
       for (const [indexName, fields] of Object.entries(this.schema.indices)) {
         console.log(`🔨 Building index: ${indexName}`);
         
-        const compositeIndex = new IndexManager(
+        const indexManager = new IndexManager(
           this.collectionPath, 
           fields, // ← Array of fields for composite
           { shardCount: 16 }
         );
         
-        await compositeIndex.buildFromDocuments(() => this.storage.getAllDocuments());
-        this.shardedIndices.set(indexName, compositeIndex);
+        await indexManager.buildFromDocuments(() => this.storage.getAllDocuments());
+        this.indices.set(indexName, indexManager);
       }
     }
   }
   
-  async _buildIndex(field) {
-    const shardedIndex = new IndexManager(this.collectionPath, field);
-    const stats = await shardedIndex.buildFromDocuments(() => this.storage.getAllDocuments());
-    this.shardedIndices.set(field, shardedIndex);
+  /*async _buildIndex(field) {
+    const indexManager = new IndexManager(this.collectionPath, field);
+    const stats = await indexManager.buildFromDocuments(() => this.storage.getAllDocuments());
+    this.shardedIndices.set(field, indexManager);
     return stats;
-  }
+  }*/
   
   async _loadIndex(name, fields) {
-    const shardedIndex = new IndexManager(this.collectionPath, fields);
-    this.shardedIndices.set(name, shardedIndex);
+    const indexManager = new IndexManager(this.collectionPath, fields);
+    this.indices.set(name, indexManager);
   }
   
-  // ---------- CORE CRUD ----------
-
   async insert(doc, options = {}) {
     const { updateIndices = true } = options;
     const id = Date.now() + '-' + Math.random().toString(36).slice(2);
@@ -226,60 +224,32 @@ class UnifiedCollection {
     const indexedFields = SchemaParser.getIndexedFields(this.schema);
     
     for (const field of indexedFields) {
-      if (this.shardedIndices.has(field)) {
-        const shardedIndex = this.shardedIndices.get(field);
+      if (this.indices.has(field)) {
+        const indexManager = this.indices.get(field);
         
         if (operation === 'insert') {
           const value = doc[field];
           if (value !== undefined && value !== null) {
-            await shardedIndex.add(value, doc.id);
+            await indexManager.add(value, doc.id);
           }
         } else if (operation === 'update') {
           const oldValue = oldDoc[field];
           const newValue = doc[field];
           
           if (oldValue !== undefined && oldValue !== null) {
-            await shardedIndex.remove(oldValue, doc.id);
+            await indexManager.remove(oldValue, doc.id);
           }
           if (newValue !== undefined && newValue !== null) {
-            await shardedIndex.add(newValue, doc.id);
+            await indexManager.add(newValue, doc.id);
           }
         } else if (operation === 'delete') {
           const value = doc[field];
           if (value !== undefined && value !== null) {
-            await shardedIndex.remove(value, doc.id);
+            await indexManager.remove(value, doc.id);
           }
         }
       }
     }
-  }
-
-  // ---------- BASIC QUERIES ----------
-  
-  async findByRange(field, min, max, options = {}) {
-    const { limit = 1000 } = options;
-    const indexedFields = SchemaParser.getIndexedFields(this.schema);
-    
-    if (!indexedFields.includes(field)) {
-      throw new Error(`Range query requires indexed field. Add ${field} to schema.fields with indexed: true`);
-    }
-    
-    const matchingIds = [];
-    
-    if (this.shardedIndices.has(field)) {
-      const shardedIndex = this.shardedIndices.get(field);
-      // Range queries on sharded indices are expensive - need to check all shards
-      const allKeys = await shardedIndex._getAllKeys();
-      for (const [key, ids] of allKeys.entries()) {
-        const numValue = parseFloat(key);
-        if (!isNaN(numValue) && numValue >= min && numValue <= max) {
-          matchingIds.push(...ids);
-        }
-      }
-    }
-    
-    const limitedIds = matchingIds.slice(0, limit);
-    return await this._loadDocuments(limitedIds);
   }
 
   async find(query) {
@@ -393,26 +363,26 @@ class UnifiedCollection {
       indices: []
     };
     
-    console.log(this.shardedIndices);
-    for (const [field, shardedIndex] of this.shardedIndices.entries()) {
+    console.log(this.indices);
+    for (const [field, indexManager] of this.indices.entries()) {
       
-      const shardIndexStats = await shardedIndex.getStats();
-      stats.indices.push(shardIndexStats);
+      const indexStats = await indexManager.getStats();
+      stats.indices.push(indexStats);
     }
     
     return stats;
   }
 
-  async optimize() {
+  /*async optimize() {
     const indexedFields = SchemaParser.getIndexedFields(this.schema);
     const rebuildPromises = indexedFields.map(field => this._buildIndex(field));
     await Promise.all(rebuildPromises);
-  }
+  }*/
 
   async close() {
     // Flush pending operations
-    for (const shardedIndex of this.shardedIndices.values()) {
-      await shardedIndex.close();
+    for (const indexManager of this.indices.values()) {
+      await indexManager.close();
     }
   }
 }

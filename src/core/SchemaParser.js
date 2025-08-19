@@ -76,17 +76,18 @@ class SchemaParser {
     return errors;
   }
 
-  static getIndexedFields(schema) {
-    const indexed = [];
+  static getSingleFieldIndexedNames(schema) {
+    const singleFieldIndexNames = new Map();
     
     for (const [indexName, fields] of Object.entries(schema.indices)) {
       if (fields.length == 1) {
-        indexed.push(fields[0]);
+        singleFieldIndexNames.set(fields[0], indexName);
       }
     }
-    
-    return indexed;
+    console.log(singleFieldIndexNames)
+    return singleFieldIndexNames;
   }
+  
   
 }
 
