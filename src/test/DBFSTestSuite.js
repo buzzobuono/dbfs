@@ -28,19 +28,20 @@ const query = {
                         $and: [
                             { age: 33 },
                             { 'role': 'developer' },
-                            { active: true },
-                           // { name: 'Alex Martin 60'}
+                            { active: false },
                         ]
-                    }
+                    },
+                    { name: 'Sam Johnson 14159'}
                 ]
-            }
-            
+            },
+            { name: 'Sam Johnson 14159'}
         ]
     },
-    like: { name: '*martin*' },
+    like: { name: '*sam*' },
     filter: { active: true },
     orderBy: 'name desc',
-    limit: 6
+    limit: 10,
+    offset: 0
 };
 
 

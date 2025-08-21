@@ -36,30 +36,172 @@ class MultiFieldQueryEngine {
     return results;
   }
 
+  async _executeComplexQuery(query) {
+    if (query.$and) {
+      return await this._executeAndArray(query.$and);
+    }
+
+    if (query.$or) {
+      return await this._executeOrArray(query.$or);
+    }
+
+    return await this.findByAnd(query);
+  }
+
+  async _executeAndArray(conditions) {
+    let results = null;
+
+    var remainingAndCondition = [];
+
+    for (const condition of conditions) {
+      let conditionResults = null;
+
+      if (condition.$or) {
+        conditionResults = await this._executeOrArray(condition.$or);
+      } else if (condition.$and) {
+        conditionResults = await this._executeAndArray(condition.$and);
+      } else {
+        remainingAndCondition.push(condition);
+        continue;
+      }
+
+      if (results === null) {
+        results = conditionResults;
+      } else {
+        const resultMap = new Map(results.map(doc => [doc.id, doc]));
+        results = conditionResults.filter(doc => resultMap.has(doc.id));
+      }
+    }
+
+    if (remainingAndCondition.length != 0) {
+      let conditionResults = await this.findByAnd(remainingAndCondition);
+
+      if (results === null) {
+        results = conditionResults;
+      } else {
+        const resultMap = new Map(results.map(doc => [doc.id, doc]));
+        results = conditionResults.filter(doc => resultMap.has(doc.id));
+      }
+    }
+
+    return results;
+  }
+
+  async _executeOrArray(conditions) {
+    const resultMap = new Map();
+
+    var remainingOrCondition = [];
+
+    for (const condition of conditions) {
+
+      let conditionResults;
+
+      if (condition.$and) {
+        conditionResults = await this._executeAndArray(condition.$and);
+      } else if (condition.$or) {
+        conditionResults = await this._executeOrArray(condition.$or);
+      } else {
+        remainingOrCondition.push(condition);
+        continue;
+      }
+
+      for (const doc of conditionResults) {
+        resultMap.set(doc.id, doc);
+      }
+    }
+
+    if (remainingOrCondition.length != 0) {
+      let conditionResults = await this.findByOr(remainingOrCondition);
+
+      for (const doc of conditionResults) {
+        resultMap.set(doc.id, doc);
+      }
+    }
+
+    const results = Array.from(resultMap.values());
+    return results;
+  }
+
   async _planAndQuery(conditions) {
     const matches = [];
     const compositeMatches = await this._evaluateCompositeMatches(conditions);
     matches.push(...compositeMatches);
     const intersectMatch = await this._evaluateIntersectMatch(conditions);
     matches.push(intersectMatch);
-    const fullScanMatch = {
-      strategy: 'FULL_SCAN',
-      estimatedSelectivity: 1
-    }
-    matches.push(fullScanMatch);
     
-    /*console.log(conditions);
-    for (const match of matches) {
-      console.log('Candidate strategy');
-      console.log(match);
-    }*/
+    const mostSelectiveMatch = matches.sort((a, b) => a.estimatedSelectivity - b.estimatedSelectivity)[0];
     
-    const mostSelectiveMatch = matches
-       .sort((a, b) => a.estimatedSelectivity - b.estimatedSelectivity)[0];
-    
-    console.log('Most selective');
-    console.log(mostSelectiveMatch);
+    //console.log(conditions);
+    //for (const match of matches) {
+    //  console.log('Candidate strategy');
+    //  console.log(match);
+    //  console.log('');
+    //}
+    //console.log('Most selective');
+    //console.log(mostSelectiveMatch);
+    //console.log('');
     return mostSelectiveMatch;
+  }
+  
+  async _planOrQuery(conditions) {
+    const fields = [];
+    for (const condition of conditions) {
+      fields.push(Object.keys(condition)[0]);
+    }
+    const singleFieldIndexNames = SchemaParser.getSingleFieldIndexNames(this.collection.schema);
+
+    const indexedFields = [];
+    const nonIndexedFields = [];
+
+    const indexManagers = [];
+
+    for (const field of fields) {
+      if (singleFieldIndexNames.has(field)) {
+        indexedFields.push(field);
+        indexManagers.push(this.collection.indices.get(singleFieldIndexNames.get(field)));
+      } else {
+        nonIndexedFields.push(field);
+      }
+    }
+
+    if (indexedFields.length > 0 && nonIndexedFields.length === 0) {
+      return {
+        strategy: 'INDEX_UNION',
+        indexedFields: indexedFields,
+        nonIndexedFields: nonIndexedFields,
+        indexManagers: indexManagers
+      };
+    } else {
+      return {
+        strategy: 'FULL_SCAN'
+      }
+    }
+  }
+
+  async _executeAndQuery(conditions, strategy) {
+    if (strategy.strategy === 'EXACT_MATCH') {
+      return await this._executeExactMatch(conditions, strategy);
+    } else if (strategy.strategy === 'PREFIX_MATCH') {
+      return await this._executePrefixMatch(conditions, strategy);
+    } else if (strategy.strategy === 'INDEX_INTERSECT') {
+      return await this._executeIndexIntersect(conditions, strategy);
+    } else if (strategy.strategy === 'INDEX_SEEK_FILTER') {
+      return await this._executeIndexSeekFilter(conditions, strategy);
+    } else if (strategy.strategy === 'FULL_SCAN') {
+      return await this._executeTableScanAndQuery(conditions);
+    } else {
+      throw new Error("No strategy found");
+    }
+  }
+
+  async _executeOrQuery(conditions, strategy) {
+    if (strategy.strategy === 'INDEX_UNION') {
+      return await this._executeIndexUnion(conditions, strategy);
+    } else if (strategy.strategy === 'FULL_SCAN') {
+      return await this._executeTableScanOrQuery(conditions);
+    } else {
+      throw new Error("No strategy found");
+    }
   }
   
   async _evaluateCompositeMatches(conditions) {
@@ -135,7 +277,7 @@ class MultiFieldQueryEngine {
     } else if (canUseIndexSeek) {
       strategy = 'INDEX_SEEK_FILTER';
     }  else {
-      strategy = 'NONE';
+      strategy = 'FULL_SCAN';
     }
     
     let match = {
@@ -175,7 +317,7 @@ class MultiFieldQueryEngine {
       }
     }
  
-    // Ordina by selectivity
+    // Order by selectivity
     indexedConditions.sort((a, b) => estimatedResults[a] - estimatedResults[b]);
     
     for (const field of fields) {
@@ -188,7 +330,7 @@ class MultiFieldQueryEngine {
       }
     }
     
-    let strategy = 'NONE';
+    let strategy = 'FULL_SCAN';
     if (canUseIndexIntersect) {
       strategy = 'INDEX_INTERSECT';
     }
@@ -204,42 +346,7 @@ class MultiFieldQueryEngine {
     
     return match;
   }
-  
-  async _planOrQuery(conditions) {
-    const fields = [];
-    for (const condition of conditions) {
-      fields.push(Object.keys(condition)[0]);
-    }
-    const singleFieldIndexNames = SchemaParser.getSingleFieldIndexNames(this.collection.schema);
 
-    const indexedFields = [];
-    const nonIndexedFields = [];
-
-    const indexManagers = [];
-
-    for (const field of fields) {
-      if (singleFieldIndexNames.has(field)) {
-        indexedFields.push(field);
-        indexManagers.push(this.collection.indices.get(singleFieldIndexNames.get(field)));
-      } else {
-        nonIndexedFields.push(field);
-      }
-    }
-
-    if (indexedFields.length > 0 && nonIndexedFields.length === 0) {
-      return {
-        strategy: 'INDEX_UNION',
-        indexedFields: indexedFields,
-        nonIndexedFields: nonIndexedFields,
-        indexManagers: indexManagers
-      };
-    } else {
-      return {
-        strategy: 'FULL_SCAN'
-      }
-    }
-  }
-  
   async _getEstimatedResults(field, value) {
     if (this.collection.indices.has(field)) {
       const indexManager = this.collection.indices.get(field);
@@ -247,32 +354,6 @@ class MultiFieldQueryEngine {
       return results.length ;
     }
     return 10000; // High estimate for non-indexed
-  }
-  
-  async _executeAndQuery(conditions, strategy) {
-    if (strategy.strategy === 'EXACT_MATCH') {
-      return await this._executeExactMatch(conditions, strategy);
-    } else if (strategy.strategy === 'PREFIX_MATCH') {
-      return await this._executePrefixMatch(conditions, strategy);
-    } else if (strategy.strategy === 'INDEX_INTERSECT') {
-      return await this._executeIndexIntersect(conditions, strategy);
-    } else if (strategy.strategy === 'INDEX_SEEK_FILTER') {
-      return await this._executeIndexSeekFilter(conditions, strategy);
-    } else if (strategy.strategy === 'FULL_SCAN') {
-      return await this._executeTableScanAndQuery(conditions);
-    } else {
-      throw new Error("No strategy found");
-    }
-  }
-  
-  async _executeOrQuery(conditions, strategy) {
-    if (strategy.strategy === 'INDEX_UNION') {
-      return await this._executeIndexUnion(conditions, strategy);
-    } else if (strategy.strategy === 'FULL_SCAN') {
-      return await this._executeTableScanOrQuery(conditions);
-    } else {
-      throw new Error("No strategy found");
-    }
   }
 
   async _executeExactMatch(conditions, strategy) {
@@ -314,8 +395,37 @@ class MultiFieldQueryEngine {
   }
   
   async _executeIndexSeekFilter(conditions, strategy) {
+    const { indexedFields, nonIndexedFields, indexManager } = strategy;
+    
     console.log(`Executing Index Seek Filter on [${strategy.indexedFields.join(', ')}], filtering [${strategy.nonIndexedFields.join(', ')}]`);
- 
+    
+    const indexedConditions = [];
+    for (let i = 0; i < indexedFields.length; i++) {
+      const field = indexedFields[i];
+      const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
+      indexedConditions.push(condition);
+    }
+
+    const values = [];
+    for (const condition of indexedConditions) {
+      let field = Object.keys(condition)[0];
+      values.push(condition[field]);
+    }
+    const resultIds = await indexManager.getPrefix(values);
+
+    let results = await this.collection._loadDocuments(resultIds);
+
+    const nonIndexedConditions = [];
+    for (let i = 0; i < nonIndexedFields.length; i++) {
+      const field = nonIndexedFields[i];
+      const condition = conditions.find(cond => Object.prototype.hasOwnProperty.call(cond, field));
+      nonIndexedConditions.push(condition);
+    }
+
+      
+    results = this._executeInMemoryFilter(results, nonIndexedConditions, strategy);
+    
+    return results;
   }
   
   async _executeIndexIntersect(conditions, strategy) {
@@ -424,92 +534,6 @@ class MultiFieldQueryEngine {
 
     for (const doc of allDocs) {
       if (this._documentMatchesConditions(doc, conditions, 'OR')) {
-        resultMap.set(doc.id, doc);
-      }
-    }
-
-    const results = Array.from(resultMap.values());
-    return results;
-  }
-
-  async _executeComplexQuery(query) {
-    if (query.$and) {
-      return await this._executeAndArray(query.$and);
-    }
-
-    if (query.$or) {
-      return await this._executeOrArray(query.$or);
-    }
-
-    return await this.findByAnd(query);
-  }
-
-  async _executeAndArray(conditions) {
-    let results = null;
-
-    var remainingAndCondition = [];
-
-    for (const condition of conditions) {
-      let conditionResults = null;
-
-      if (condition.$or) {
-        conditionResults = await this._executeOrArray(condition.$or);
-      } else if (condition.$and) {
-        conditionResults = await this._executeAndArray(condition.$and);
-      } else {
-        remainingAndCondition.push(condition);
-        continue;
-      }
-
-      if (results === null) {
-        results = conditionResults;
-      } else {
-        const resultMap = new Map(results.map(doc => [doc.id, doc]));
-        results = conditionResults.filter(doc => resultMap.has(doc.id));
-      }
-    }
-
-    if (remainingAndCondition.length != 0) {
-      let conditionResults = await this.findByAnd(remainingAndCondition);
-
-      if (results === null) {
-        results = conditionResults;
-      } else {
-        const resultMap = new Map(results.map(doc => [doc.id, doc]));
-        results = conditionResults.filter(doc => resultMap.has(doc.id));
-      }
-    }
-
-    return results;
-  }
-
-  async _executeOrArray(conditions) {
-    const resultMap = new Map();
-
-    var remainingOrCondition = [];
-
-    for (const condition of conditions) {
-
-      let conditionResults;
-
-      if (condition.$and) {
-        conditionResults = await this._executeAndArray(condition.$and);
-      } else if (condition.$or) {
-        conditionResults = await this._executeOrArray(condition.$or);
-      } else {
-        remainingOrCondition.push(condition);
-        continue;
-      }
-
-      for (const doc of conditionResults) {
-        resultMap.set(doc.id, doc);
-      }
-    }
-
-    if (remainingOrCondition.length != 0) {
-      let conditionResults = await this.findByOr(remainingOrCondition);
-
-      for (const doc of conditionResults) {
         resultMap.set(doc.id, doc);
       }
     }

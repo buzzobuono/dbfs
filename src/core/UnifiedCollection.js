@@ -18,11 +18,11 @@ class UnifiedCollection {
     this.name = name;
     this.schema = SchemaParser.parseSchema(schema);
     this.db = db;
-    this.maxPerDir = schema.maxPerDir || 100;
+    this.shardCount = schema.shardCount || 16;
     this.options = options;
     
     // Storage
-    this.storage = new DocumentStorage(this.collectionPath, this.maxPerDir);
+    this.storage = new DocumentStorage(this.collectionPath, this.shardCount);
     
     // Index management
     this.indices = new Map();

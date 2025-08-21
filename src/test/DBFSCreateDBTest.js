@@ -24,8 +24,7 @@ const users = await db.collection('users', {
     'name': ['name'],
     'active': ['active'],
     'age_role_active' : [ 'age', 'role', 'active']
-  },
-  maxPerDir: 10
+  }
 });
 
 const roles = ['developer', 'designer', 'manager'];
@@ -52,7 +51,7 @@ function generateName(index) {
   return `${getRandomElement(firstNames)} ${getRandomElement(lastNames)} ${index}`;
 }
 
-for (let i = 1; i <= 10000; i++) {
+for (let i = 1; i <= 100000; i++) {
   const role = getRandomElement(roles);
   const name = generateName(i);
   const email = name.toLowerCase().replace(/\s+/g, '.').replace(/_/g, '') + '@test.com';

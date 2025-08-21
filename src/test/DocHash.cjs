@@ -274,7 +274,9 @@ async function example() {
         const user = await storage.get('user123');
         console.log('Retrieved user:', user);
         
+        console.time('1');
         const nonExistent = await storage.get('user999');
+        console.timeEnd('1');
         console.log('Non-existent user:', nonExistent);
         
         // Stats
